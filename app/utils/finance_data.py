@@ -639,7 +639,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
     return [static_metrics[t] for t in tickers_list]
         
 
-def remove_from_price_history(ticker, , interval, category_name='assets'):
+def remove_from_price_history(ticker, interval, category_name='assets'):
     #print("remove_from_price_history called")
     
     cache_dir = current_app.config['DATA_FOLDER']
