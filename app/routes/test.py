@@ -45,9 +45,11 @@ def test_feature():
         
     if not tickers_4h.issubset(tickers_1d):
         print("Syncing 1d columns with 4h columns.")
+        download_start = stocks_data_fallback.index.min()
         finance_data.fetch_latest_metrics(  list(tickers_4h),
                                             category_name='stocks',
-                                            interval='1d', target_start_date=datetime.now()-timedelta(days=365)) # Use daily prices here!
+                                            interval='1d',
+                                            target_start_date=download_start) # Use daily prices here!
         stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
          
     if stocks_data is not None:

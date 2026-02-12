@@ -552,7 +552,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
         download_start = hist_prices.index.min() # Use existing history as boundary
         new_ticker_data = yf.download(  ticker_to_add, 
                                         start= download_start,
-                                        interval='4h', # TODO replace by correct interval
+                                        interval=interval, # TODO replace by correct interval
                                         auto_adjust=True)
                                         
         if not new_ticker_data.empty:
