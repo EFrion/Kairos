@@ -639,12 +639,12 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
     return [static_metrics[t] for t in tickers_list]
         
 
-def remove_from_price_history(ticker, category_name='assets'):
+def remove_from_price_history(ticker, category_name='assets', interval):
     #print("remove_from_price_history called")
     
     cache_dir = current_app.config['DATA_FOLDER']
     os.makedirs(cache_dir, exist_ok=True)
-    price_cache_path = os.path.join(cache_dir, f"{category_name}_price_history_4h.csv") #TODO replace 4h by interval
+    price_cache_path = os.path.join(cache_dir, f"{category_name}_price_history_{interval}.csv") #TODO replace 4h by interval
     try:
         df = pd.read_csv(price_cache_path, index_col=0)
         if ticker in df.columns:

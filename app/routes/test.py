@@ -29,6 +29,7 @@ def test_feature():
     if os.path.exists(stocks_data_path) and os.path.getsize(stocks_data_path) > 0:
         try:
             stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
+            tickers = sorted(stocks_data.columns.tolist())
         except Exception as e:
             print(f"FAILED TO READ CSV: {e}")
     elif os.path.exists(stocks_data_path_fallback) and os.path.getsize(stocks_data_path_fallback) > 0: # Fallback if we don't
