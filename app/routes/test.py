@@ -29,25 +29,26 @@ def test_feature():
     if os.path.exists(stocks_data_path) and os.path.getsize(stocks_data_path) > 0:
         try:
             stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
-            tickers = sorted(stocks_data.columns.tolist())
+            tickers_1d = set(stocks_data.columns)
         except Exception as e:
             print(f"FAILED TO READ CSV: {e}")
-    elif os.path.exists(stocks_data_path_fallback) and os.path.getsize(stocks_data_path_fallback) > 0: # Fallback if we don't
-        print(f"No price history in {stocks_data_path}. Trying fallback")
+    
+    if os.path.exists(stocks_data_path_fallback) and os.path.getsize(stocks_data_path_fallback) > 0:
         try:
             stocks_data_fallback = pd.read_csv(stocks_data_path_fallback, index_col='Datetime', parse_dates=True).dropna()
-        except:
-            print("No fallback historical data.")
+            tickers_4h = set(stocks_data_fallback.columns)
+        except Exception as e:
+            print(f"FAILED TO READ CSV: {e}")
             
         tickers = sorted(stocks_data_fallback.columns.tolist())
         print("tickers: ", tickers)
-        finance_data.fetch_latest_metrics(  tickers,
+        
+    if not tickers_4h.issubset(tickers_1d):
+        print("Syncing 1d columns with 4h columns.")
+        finance_data.fetch_latest_metrics(  list(tickers_4h),
                                             category_name='stocks',
                                             interval='1d', target_start_date=datetime.now()-timedelta(days=365)) # Use daily prices here!
         stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
-    else:
-        print("No fallback. Abort")
-        return
          
     if stocks_data is not None:
         # Check data integrity
