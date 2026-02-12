@@ -404,7 +404,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
     """
     Fetches the latest data and valuation metrics for a list of tickers using yfinance.
     """
-    #print("fetch_latest_metrics called")
+    print("fetch_latest_metrics called")
     if not tickers_list:
         return []
         
@@ -413,6 +413,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
         cache_dir = current_app.config['DATA_FOLDER']
     else:
         cache_dir = current_app.config['TEST_FOLDER']
+    print("cache_dir: ", cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
     price_cache_path    = os.path.join(cache_dir, f"{category_name}_price_history_{interval}.csv") # Interval is 4h for intraday monitoring portfolio, 1d for backtesting
     info_cache_path     = os.path.join(cache_dir, f"{category_name}_metrics_static.json")
@@ -456,7 +457,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
             # Determine the existing range of cached data
             first_datetime = hist_prices.index[0]
             last_datetime = hist_prices.index[-1]
-            #print("Last update time from price history: ", last_datetime)
+            print("Last update time from price history: ", last_datetime)
     else:
         print("No historical prices. Fetching new prices.")
         last_datetime = datetime.now()-timedelta(days=3) # Set to 3 arbitrarily. Creates a file
@@ -541,22 +542,40 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
         needs_price_download = datetime.now() - last_update_time > timedelta(hours=4)
     #needs_price_download, download_start = check_price_cache_status(hist_prices, tickers_list, required_days) #TODO remove?
            
+    # Check if a ticker is new and force download
+    new_ticker = [t for t in tickers_list if t not in hist_prices.columns]
+    if new_ticker:
+        ticker_to_add = new_ticker[0]
+        print(f"New ticker: {ticker_to_add}, start download.")
+        download_start = hist_prices.index.min() # Use existing history as boundary
+        new_ticker_data = yf.download(  ticker_to_add, 
+                                        start= download_start,
+                                        interval='4h', # TODO replace by correct interval
+                                        auto_adjust=True)
+                                        
+        if not new_ticker_data.empty:
+            new_price = new_ticker_data.xs('Close', axis=1, level=0)
+            hist_prices = hist_prices.join(new_price, how='outer')
+            hist_prices = hist_prices.reindex(sorted(hist_prices.columns), axis=1)
+            hist_prices.index.name = 'Datetime'
+            hist_prices.to_csv(price_cache_path, index=True)
+            print(f"Added {ticker_to_add} to history.")
 
     # Don't download stocks prices if not a business day
     is_business_day = BDay().is_on_offset(datetime.now())
-    #print("is_business_day: ", is_business_day)
+    print("is_business_day: ", is_business_day)
     
-    if (not is_business_day and category_name=='stocks'):
+    if (not is_business_day and category_name=='stocks' and not new_ticker):
         needs_price_download = False
     
-    #print("needs_price_download: ", needs_price_download)
+    print("needs_price_download: ", needs_price_download)
     #print("download_start: ", download_start)
     
     if needs_price_download: 
         print(f"Cache older than {interval}. Updating market data...")
         
         new_data = yf.download(tickers_list, start=last_datetime, end=datetime.now(), interval=interval, group_by='ticker', auto_adjust=True, progress=False)
-        #print("new_data: ", new_data.tail(5))
+        print("new_data: ", new_data.tail(5))
         
         
         if not new_data.empty:
@@ -623,7 +642,7 @@ def remove_from_price_history(ticker, category_name='assets'):
     
     cache_dir = current_app.config['DATA_FOLDER']
     os.makedirs(cache_dir, exist_ok=True)
-    price_cache_path = os.path.join(cache_dir, f"{category_name}_price_history.csv")
+    price_cache_path = os.path.join(cache_dir, f"{category_name}_price_history_4h.csv") #TODO replace 4h by interval
     try:
         df = pd.read_csv(price_cache_path, index_col=0)
         if ticker in df.columns:

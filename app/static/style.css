@@ -355,6 +355,7 @@ table {
 /* Chart container styling */
 .chart-container {
     flex-grow: 1;
+    min-height: 500px;
     background: white;
     padding: 0px;
     margin-top: 0;
