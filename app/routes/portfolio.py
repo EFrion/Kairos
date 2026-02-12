@@ -420,8 +420,8 @@ def delete_asset(asset_class, ticker):
         
         # Clean up metrics and price history
         finance_data.remove_from_metrics(ticker, asset_class)
-        finance_data.remove_from_price_history(ticker,interval='4h',asset_class)
-        finance_data.remove_from_price_history(ticker,interval='1d',asset_class)
+        finance_data.remove_from_price_history(ticker,'4h',category_name=asset_class)
+        finance_data.remove_from_price_history(ticker,'1d',category_name=asset_class)
         
         return jsonify({'status': 'success', 'message': f'{ticker} removed.'})
     
