@@ -9,9 +9,14 @@ on:
 jobs:
   update_date:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: none
+      packages: none
+      actions: none
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: true
 
