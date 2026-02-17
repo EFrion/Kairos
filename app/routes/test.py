@@ -1,9 +1,11 @@
 from flask import Blueprint, render_template, request, jsonify, current_app
 from app.utils import plotting_utils, finance_data
 import os
+import json
 import pandas as pd
 import plotly.io as pio
 import numpy as np
+from scipy import stats
 from datetime import datetime, date, timedelta
 
 bp = Blueprint('test', __name__)
@@ -79,6 +81,10 @@ def test_feature():
     else:
         return "Error: historical prices could not be loaded.", 404
     
+    sharpe = sharpe_ratio(stocks_data, RISK_FREE_RATE=0.0)
+    semivar = semivariance(stocks_data)
+    sortino = sortino_ratio(stocks_data, RISK_FREE_RATE=0.0)
+    
 #    # Check data integrity
 #    if ~stocks_value_data:
 #        print("No NaN in stocks data")
@@ -97,8 +103,51 @@ def test_feature():
     return render_template( 'test.html',
                             tickers=tickers,
                             selected_ticker=selected_ticker,
+                            sharpe=sharpe,
+                            semivariance=semivar,
+                            sortino=sortino,
                             title='Portfolio Optimisation & Backtesting')
 
+def sharpe_ratio(stocks_data, RISK_FREE_RATE=0.0):
+    """
+       Calculate the Sharpe ratio
+       Formula: Sharpe ratio = (R_p-R_fr)/sigma_p
+    """
+    return (stocks_data.mean() - RISK_FREE_RATE) / stocks_data.std()
+    
+def semivariance(stocks_data):
+    """
+       Calculate the semivariance
+       Formula: Semivariance = (Sum_{r_i < <r>}^{n} (r_i - <r>)²) / n
+    """
+    # Average on all observations
+    stocks_mean = stocks_data.mean()
+    diff = stocks_data - stocks_mean
+    downside_diff = diff.clip(upper=0) # Set positive deviations to 0
+    stocks_semivariance = (downside_diff**2).mean()
+    #print("stocks_semivariance: ", stocks_semivariance)
+    
+    # Average only on bad days
+#    stocks_mean2 = stocks_data.mean()
+#    stocks2_semivariance = ((stocks_data[stocks_data < stocks_mean2] - stocks_mean2) ** 2).mean()
+#    print("stocks2_semivariance: ", stocks2_semivariance)
+    return stocks_semivariance
+    
+def sortino_ratio(stocks_data, RISK_FREE_RATE=0.0): #TODO merge with semivariance?
+    """
+       Calculate the Sortino ratio
+       Formula: Sortino ratio = (R_p+-R_fr)/sigma_p+
+    """
+    # Average on all observations
+    stocks_mean = stocks_data.mean()
+    diff = stocks_data - stocks_mean
+    downside_diff = diff.clip(upper=0) # Set positive deviations to 0
+    stocks_semivariance = (downside_diff**2).mean()
+    stocks_semistd = np.sqrt(stocks_semivariance)
+    #print("stocks_semistd: ", stocks_semistd)
+    
+    return (stocks_mean - RISK_FREE_RATE) / stocks_semistd
+    
 #def investCompare(stocks_data, startTime, endTime, tickers, cache_dir):
 #    startTime = pd.Timestamp(startTime).tz_localize('UTC')
 #    endTime = pd.Timestamp(endTime).tz_localize('UTC')
@@ -166,13 +215,13 @@ def test_feature():
 #      
 #    return investments, stocks_value_returns, log_return_rate
 
-# Plots update
-@bp.route('/get_plot')
-def get_plot():
-    print("get_plot called")
+# Plots and metrics update
+@bp.route('/get_data')
+def get_data():
+    print("get_data called")
     
     ticker = request.args.get('ticker')
-    ticker2 = request.args.get('ticker2')
+    ticker2 = request.args.get('ticker2') # For the 2D correlation mode
     if not ticker:
         return "No ticker provided", 400
         
@@ -194,22 +243,127 @@ def get_plot():
     
     # Slice the specific ticker and drop its specific NaNs
     ticker_df = stocks_data[[ticker]].dropna()
+    # Take its log returns
+    ticker_log_returns = np.log(ticker_df)-np.log(ticker_df.shift(1))
+    ticker_log_returns.dropna(inplace=True)
     #print("ticker_df: ", ticker_df)
+    #print("ticker_log_returns: ", ticker_log_returns)
+    
+    # Compute the Sharpe ratio
+    sharpe = sharpe_ratio(ticker_log_returns).dropna()
+    # If it's a Series, grab the scalar value
+    if hasattr(sharpe, 'iloc'):
+        sharpe = sharpe.iloc[0]
+    
+    #print("sharpe: ", sharpe)
+    
+    # Compute the semivariance
+    semivar = semivariance(ticker_log_returns).dropna()
+    # If it's a Series, grab the scalar value
+    if hasattr(semivar, 'iloc'):
+        semivar = semivar.iloc[0]
+    
+    #print("semivariance: ", semivar)
+    
+    # Compute the Sharpe ratio
+    sortino = sortino_ratio(ticker_log_returns).dropna()
+    # If it's a Series, grab the scalar value
+    if hasattr(sortino, 'iloc'):
+        sortino = sortino.iloc[0]
+    
+    #print("sortino: ", sortino)
+    
+    # Compute the symmetry score
+    counts = (ticker_log_returns > ticker_log_returns.mean()).sum().iloc[0]
+    #print("counts: ", counts)
+    total = ticker_log_returns.count().iloc[0]
+    #print("total: ", total)
+    symmetry_score = (counts/total)*100
+    
+    # Normality test (D'Agostino-Pearson)
+    dagostino_pearson_statistics, dagostino_pearson_pvalue= stats.normaltest(ticker_log_returns)
+    dagostino_pearson_statistics = dagostino_pearson_statistics[0]
+    dagostino_pearson_pvalue = dagostino_pearson_pvalue[0]
+    #print("dagostino_pearson_statistics: ", dagostino_pearson_statistics)
+    #print("dagostino_pearson_pvalue: ", dagostino_pearson_pvalue)
+    
+    # Normality test (Jarque-Bera)
+    jarque_bera_statistics, jarque_bera_pvalue= stats.normaltest(ticker_log_returns)
+    jarque_bera_statistics = jarque_bera_statistics[0]
+    jarque_bera_pvalue = jarque_bera_pvalue[0]
+    #print("jarque_bera_statistics: ", jarque_bera_statistics)
+    #print("jarque_bera_pvalue: ", jarque_bera_pvalue)
+    
+    # Z-scores
+    ticker_max = ticker_log_returns.max()
+    ticker_min = ticker_log_returns.min()
+    ticker_std = ticker_log_returns.std()
+    
+    if hasattr(ticker_max, 'iloc'):
+        ticker_max = ticker_max.iloc[0]
+    
+    if hasattr(ticker_min, 'iloc'):
+        ticker_min = ticker_min.iloc[0]
+        
+    if hasattr(ticker_log_returns, 'iloc'):
+        ticker_mean = ticker_log_returns.mean().iloc[0]
+        
+    if hasattr(ticker_std, 'iloc'):
+        ticker_std = ticker_std.iloc[0]
+        
+    print("ticker_max: ", ticker_max)
+    print("ticker_min: ", ticker_min)
+    print("ticker_mean: ", ticker_mean)
+    print("ticker_std: ", ticker_std)
+    
+    
+    z_score_max = (ticker_max - ticker_mean) / ticker_std
+    z_score_min = (ticker_min - ticker_mean) / ticker_std
+    print("z_score_max: ", z_score_max)
+    print("z_score_min: ", z_score_min)
+    
+    # Number of outliers (deviation from normality)
+    upper_bound = 3*ticker_std + ticker_mean
+    lower_bound = -3*ticker_std + ticker_mean
+    print("upper_bound: ", upper_bound)
+    print("lower_bound: ", lower_bound)
+    len_returns_below = len(ticker_log_returns[ticker_log_returns<lower_bound].dropna())
+    len_returns_above = len(ticker_log_returns[ticker_log_returns>upper_bound].dropna())
+    len_outliers = len_returns_below + len_returns_above
+    print("len_outliers: ", len_outliers)
     
     # Slice the data for just the ONE ticker requested
     if mode == 'price':
-        fig = plotting_utils.create_price_chart(stocks_data[[ticker]], rolling_windows=[20,50,200])
+        fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20,50,200])
     elif mode == 'returns':
         fig = plotting_utils.create_returns_distribution_chart(ticker_df)
     elif mode == 'map-2dcorr':
         t2 = ticker2 if ticker2 else ticker # Fallback to self if none selected
-        fig = plotting_utils.create_2d_correlation_map(stocks_data[[ticker]], stocks_data[[t2]])
+        combined_df = stocks_data[[ticker, t2]].dropna()
+        fig = plotting_utils.create_2d_correlation_map(combined_df[[ticker]], combined_df[[t2]])
     elif mode == 'sentiment': #TODO
-        fig = plotting_utils.create_price_chart(stocks_data[[ticker]], rolling_windows=[20,50,200])
+        fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20,50,200])
     
-    print("get_plot out")
+    print("get_data out")
 
-    return pio.to_json(fig)
+    #return pio.to_json(fig)
+    fig_json = pio.to_json(fig)
+    fig_dict = json.loads(fig_json)
+    
+    return jsonify({
+        'fig_data': fig_dict, # Convert Plotly fig to a dict instead of JSON string
+        'sharpe': f"{sharpe:.2e}",
+        'semivariance': f"{semivar:.2e}",
+        'sortino': f"{sortino:.2e}",
+        'symmetry_score': f"{symmetry_score:.2f}",
+        'dagostino_pearson_statistics': f"{dagostino_pearson_statistics:.2f}",
+        'dagostino_pearson_pvalue': f"{dagostino_pearson_pvalue:.2e}",
+        'jarque_bera_statistics': f"{jarque_bera_statistics:.2f}",
+        'jarque_bera_pvalue': f"{jarque_bera_pvalue:.2e}",
+        'z_score_max': f"{z_score_max:.2f}",
+        'z_score_min': f"{z_score_min:.2f}",
+        'len_outliers': f"{len_outliers}"
+    })
 
 #@bp.route('/expand_history/<asset_type>', methods=['POST']) #TODO
 #def expand_history(asset_type):

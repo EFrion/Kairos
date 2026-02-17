@@ -577,7 +577,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
         print(f"Cache older than {interval}. Updating market data...")
         
         new_data = yf.download(tickers_list, start=last_datetime, end=datetime.now(), interval=interval, group_by='ticker', auto_adjust=True, progress=False)
-        print("new_data: ", new_data.tail(5))
+        #print("new_data: ", new_data.tail(5))
         
         
         if not new_data.empty:

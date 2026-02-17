@@ -7,6 +7,7 @@ import os
 import statsmodels.api as sm
 import plotly.graph_objects as go
 import pandas as pd
+from scipy import stats
 
 def create_monthly_dividends_figure(stock_metrics, current_shares):
     """
@@ -295,22 +296,48 @@ def create_returns_distribution_chart(ticker_data):
     data_max = data.max()
     #print("data_min: ", data_min)
     #print("data_max: ", data_max)
+    #print("len data: ", len(data))
     
     fig.add_trace(go.Histogram(
         x=data.tolist(),
         name='Return Frequency',
+        histnorm='probability density',
         marker=dict(
             color='#007BFF',
             line=dict(color='white', width=0.5) # Outline ensures visibility
         ),
         opacity=0.75,
-        hovertemplate='Return: %{x:.2%}<br>Frequency: %{y}<extra></extra>'
+        hovertemplate='Return: %{x:.2%}<br>Density: %{y}<extra></extra>'
     ))
 
     # Add vertical line for mean return
     mean_return = np.mean(data)
     fig.add_vline(x=mean_return, line_dash="dash", line_color="red", 
                   annotation_text=f"Mean: {mean_return:.2%}")
+
+    # Add normal fit
+    x_range = np.linspace(data.min(), data.max(), 100)
+    y_pdf = stats.norm.pdf(x_range, loc=data.mean(), scale=data.std())
+
+    fig.add_trace(go.Scatter(
+                x=x_range.tolist(),
+                y=y_pdf.tolist(),
+                mode='lines',
+                name='Normal dist.',
+                hovertemplate=f"<br>Normal dist.: %{{y:.2f}}<extra></extra>"
+            ))
+            
+    # Add a Student's t fit
+    params = stats.t.fit(data) # Maximum Likelihood Estimation
+    student_t = stats.t.pdf(x_range,*params)
+    
+    fig.add_trace(go.Scatter(
+                x=x_range.tolist(),
+                y=student_t.tolist(),
+                mode='lines',
+                name='Students t dist.',
+                hovertemplate=f"<br>Student's t dist.: %{{y:.2f}}<extra></extra>"
+            ))
 
     fig.update_layout(
         title=f"Log Returns Distribution",

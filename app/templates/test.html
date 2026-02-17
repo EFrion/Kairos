@@ -64,6 +64,144 @@
         </div>
     </div>
     
+    <h2 style="padding-top: 10px">Metrics</h2>
+    
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Sharpe</th>
+                    <th>Semivariance</th>
+                    <th>Sortino</th>
+                    <th>Symmetry score</th>
+                    <th>D'Agostino-Pearson statistics</th>
+                    <th>D'Agostino-Pearson p-value</th>
+                    <th>Jarque-Bera statistics</th>
+                    <th>Jarque-Bera p-value</th>
+                    <th>Z-score max</th>
+                    <th>Z-score min</th>
+                    <th>Number outliers</th>
+                </td>
+            </thead>
+            
+            <tbody>
+                <tr>
+                    <td>
+                        <span id="sharpe-ratio-display">
+                            {% if sharpe[selected_ticker] is defined %}
+                                {{ "%.2e"|format(sharpe[selected_ticker]) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="semivariance-display">
+                            {% if semivariance[selected_ticker] is defined %}
+                                {{ "%.2e"|format(semivariance[selected_ticker]) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="sortino-ratio-display">
+                            {% if sortino[selected_ticker] is defined %}
+                                {{ "%.2e"|format(sortino[selected_ticker]) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="symmetry-score-display">
+                            {% if symmetry_score is defined %}
+                                {{ "%.2f"|format(symmetry_score) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>%
+                    </td>
+
+                    <td>
+                        <span id="dagostino_pearson_statistics-display">
+                            {% if dagostino_pearson_statistics is defined %}
+                                {{ "%.2f"|format(dagostino_pearson_statistics) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="dagostino_pearson_pvalue-display">
+                            {% if dagostino_pearson_pvalue is defined %}
+                                {{ "%.2e"|format(dagostino_pearson_pvalue) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="jarque_bera_statistics-display">
+                            {% if jarque_bera_statistics is defined %}
+                                {{ "%.2f"|format(jarque_bera_statistics) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+
+                    <td>
+                        <span id="jarque_bera_pvalue-display">
+                            {% if jarque_bera_pvalue is defined %}
+                                {{ "%.2e"|format(jarque_bera_pvalue) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+                    
+                    <td>
+                        <span id="z_score_max-display">
+                            {% if z_score_max is defined %}
+                                {{ "%.2f"|format(z_score_max) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+                    
+                    <td>
+                        <span id="z_score_min-display">
+                            {% if z_score_min is defined %}
+                                {{ "%.2f"|format(z_score_min) }}
+                            {% else %}
+                                0.0
+                            {% endif %}
+                        </span>
+                    </td>
+                    
+                    <td>
+                        <span id="len_outliers-display">
+                            {% if len_outliers is defined %}
+                                {{ len_outliers }}
+                            {% else %}
+                                0
+                            {% endif %}
+                        </span>
+                    </td>
+                </tr>
+            <tbdody>
+        </table>
+
+        
+    </div>
+    
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -78,12 +216,12 @@
             
             function updateView() {
                 // Here we update the fetch URL to include the mode
-                // Example: /get_plot?ticker=AAPL&mode=price
+                // Example: /get_data?ticker=AAPL&mode=price
                 document.getElementById('chart-title').innerText = currentTicker;
                 
                 console.log(`Fetching ${currentMode} for ${currentTicker}`);
                 
-                let url = `/get_plot?ticker=${currentTicker}&mode=${currentMode}`;
+                let url = `/get_data?ticker=${currentTicker}&mode=${currentMode}`;
                 
                 if (currentMode === 'map-2dcorr' && secondaryTicker) {
                     url += `&ticker2=${secondaryTicker}`;
@@ -92,10 +230,81 @@
                 const container = document.getElementById('price-plot-container');
                 
                 fetch(url)
-                    .then(response => response.json())
-                    .then(figData => {
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
                         // Plotly.react updates an existing plot if it's there.
-                        Plotly.react(container, figData.data, figData.layout);
+                        Plotly.react(container, data.fig_data.data, data.fig_data.layout);
+                        
+                        // Update Sharpe ratio
+                        const sharpeRatio = document.getElementById('sharpe-ratio-display');
+                        if (sharpeRatio && data.sharpe) {
+                            sharpeRatio.innerText = data.sharpe;
+                        }
+                        
+                        // Update semivariance
+                        const semivariance = document.getElementById('semivariance-display');
+                        if (semivariance && data.semivariance) {
+                            semivariance.innerText = data.semivariance;
+                        }
+                        
+                        // Update Sortino ratio
+                        const sortinoRatio = document.getElementById('sortino-ratio-display');
+                        if (sortinoRatio && data.sortino) {
+                            sortinoRatio.innerText = data.sortino;
+                        }
+                        
+                        // Update symmetry score
+                        const symmetryScore = document.getElementById('symmetry-score-display');
+                        if (symmetryScore && data.symmetry_score) {
+                            symmetryScore.innerText = data.symmetry_score;
+                        }
+                        
+                        // Update D'Agostino-Pearson statistics
+                        const dagostino_pearson_statistics = document.getElementById('dagostino_pearson_statistics-display');
+                        if (dagostino_pearson_statistics && data.dagostino_pearson_statistics) {
+                            dagostino_pearson_statistics.innerText = data.dagostino_pearson_statistics;
+                        }
+                        
+                        // Update D'Agostino-Pearson p-value
+                        const dagostino_pearson_pvalue = document.getElementById('dagostino_pearson_pvalue-display');
+                        if (dagostino_pearson_pvalue && data.dagostino_pearson_pvalue) {
+                            dagostino_pearson_pvalue.innerText = data.dagostino_pearson_pvalue;
+                        }
+                        
+                        // Update Jarque-Bera statistics
+                        const jarque_bera_statistics = document.getElementById('jarque_bera_statistics-display');
+                        if (jarque_bera_statistics && data.jarque_bera_statistics) {
+                            jarque_bera_statistics.innerText = data.jarque_bera_statistics;
+                        }
+                        
+                        // Update Jarque-Bera p-value
+                        const jarque_bera_pvalue = document.getElementById('jarque_bera_pvalue-display');
+                        if (jarque_bera_pvalue && data.jarque_bera_pvalue) {
+                            jarque_bera_pvalue.innerText = data.jarque_bera_pvalue;
+                        }
+                        
+                        // Update z-score max
+                        const z_score_max = document.getElementById('z_score_max-display');
+                        if (z_score_max && data.z_score_max) {
+                            z_score_max.innerText = data.z_score_max;
+                        }
+                        
+                        // Update z-score min
+                        const z_score_min = document.getElementById('z_score_min-display');
+                        if (z_score_min && data.z_score_min) {
+                            z_score_min.innerText = data.z_score_min;
+                        }
+                        
+                        // Update number of outliers
+                        const len_outliers = document.getElementById('len_outliers-display');
+                        if (len_outliers && data.len_outliers) {
+                            len_outliers.innerText = data.len_outliers;
+                        }
                     })
                     .catch(err => {
                         console.error("Plotly Error:", err);
@@ -196,7 +405,7 @@
                 btn.innerText = "Downloading...";
                 btn.disabled = true;
 
-                // Call a new Flask route we'll create below
+                // Call a new Flask route
                 fetch(`/expand_history?ticker=${ticker}&start=${startDate}`)
                     .then(response => response.json())
                     .then(data => {
