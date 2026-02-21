@@ -261,9 +261,18 @@ def get_portfolio_data():
     portfolio_value = (1+returns_portfolio).cumprod()
     print("portfolio_value: ", portfolio_value)
     
-    # Log returns of the portfolio (Continuous compounding rate)
+    # Log returns of the portfolio (continuous compounding rate)
     log_returns_portfolio = np.log(portfolio_value).diff().dropna()
     print("log_returns_portfolio: ", log_returns_portfolio)
+    
+    # Annualising log returns
+    annual_log_returns_portfolio = log_returns_portfolio.mean()*252
+    print("annual_log_returns_portfolio :", annual_log_returns_portfolio)
+    
+    # Annualising simple returns
+    geometric_mean_portfolio = ((1+returns_portfolio).prod()**(1/len(returns_portfolio)))-1
+    annual_simple_returns_portfolio = (1+geometric_mean_portfolio)**252 - 1
+    print("annual_simple_returns_portfolio :", annual_simple_returns_portfolio)
     
     # Log returns of individual stocks
     log_returns = np.log(stocks_data)-np.log(stocks_data.shift(1))
