@@ -95,9 +95,9 @@ def plot_correlation_heatmap(correlation_matrix):
 
     matrix_values = correlation_matrix.round(3).values.tolist()
     tickers = correlation_matrix.columns.tolist()
-    num_assets = len(tickers)
+    #num_assets = len(tickers)
     
-    dynamic_size = min(500, (num_assets * 35) + 150)
+    #dynamic_size = min(500, (num_assets * 35) + 150)
     
     heatmap = go.Heatmap(
         z=matrix_values,
@@ -113,46 +113,91 @@ def plot_correlation_heatmap(correlation_matrix):
     
     fig = go.Figure(data=[heatmap])
     
+#    fig.update_layout(
+#        autosize=True,
+#        template="plotly_white",
+#         margin=dict(l=40, r=40, t=10, b=40), 
+#        yaxis=dict(
+#            autorange='reversed',
+#            #scaleanchor="x",
+#            #scaleratio=1,
+#            domain=[0, 1],  # full vertical space
+#            side='left',
+#            tickangle=0,
+#            ticks='outside',
+#            showline=True,
+#            linewidth=1,
+#            linecolor='black',
+#            mirror=True,
+#            automargin=True
+#        ),
+#        xaxis=dict(
+#            tickangle=45,
+#            side='bottom',
+#            ticks='outside',
+#            showline=True,
+#            linewidth=1,
+#            linecolor='black',
+#            mirror=True,
+#            automargin=True
+#        ),
+#        coloraxis_colorbar=dict(
+#            thickness=20,      # thinner legend bar
+#            len=0.8,          # height relative to plot (80%)
+#            y=0.5,            # center vertically
+#            yanchor='middle',
+#            x=1.02,           # push closer to heatmap (default is ~1.05)
+#            ticks='outside',
+#            outlinewidth=1,
+#            outlinecolor='black'
+#        )
+#    )
+#    
+#    fig.update_xaxes(tickson='boundaries')
+#    fig.update_yaxes(tickson='boundaries')
+
     fig.update_layout(
-        height=dynamic_size*0.8,
-        width=dynamic_size,
+        autosize=True,
         template="plotly_white",
-        margin=dict(l=0, r=80, t=0, b=0),  # reduce left margin (was 60), keep enough right margin for legend
-        yaxis=dict(
-            autorange='reversed',
-            scaleanchor="x",
-            scaleratio=1,
-            domain=[0, 1],  # full vertical space
-            side='left',
-            tickangle=0,
-            ticks='outside',
-            showline=True,
-            linewidth=1,
-            linecolor='black',
-            mirror=True,
-            automargin=True
-        ),
-        xaxis=dict(
-            tickangle=45,
-            side='bottom',
-            ticks='outside',
-            showline=True,
-            linewidth=1,
-            linecolor='black',
-            mirror=True,
-            automargin=True
-        ),
+        margin=dict(l=40, r=40, t=10, b=40),
         coloraxis_colorbar=dict(
-            thickness=20,      # thinner legend bar
-            len=0.8,          # height relative to plot (80%)
-            y=0.5,            # center vertically
+            thickness=20,
+            len=0.8,
+            y=0.5,
             yanchor='middle',
-            x=1.02,           # push closer to heatmap (default is ~1.05)
+            x=1,  # right at edge of plot domain
             ticks='outside',
             outlinewidth=1,
-            outlinecolor='black'
+            outlinecolor='black',
         )
     )
+
+    fig.update_xaxes(
+        type='category',
+        tickson='boundaries',
+        constrain='domain',
+        ticks='outside',
+        showline=True,
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        tickangle=45,
+        automargin=True
+    )
+
+    fig.update_yaxes(
+        type='category',
+        tickson='boundaries',
+        constrain='domain',
+        autorange='reversed',
+        ticks='outside',
+        showline=True,
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        automargin=True
+    )
+
 
     print("plot_correlation_heatmap out ")
     
@@ -340,7 +385,7 @@ def create_price_chart(stocks_data, start_date=None, end_date=None, rolling_wind
     
     return fig
     
-def create_returns_distribution_chart(ticker_data):
+def create_returns_distribution_chart(returns):
     """
     Distribution plot for log returns.
     
@@ -349,16 +394,12 @@ def create_returns_distribution_chart(ticker_data):
     """
     print("create_returns_distribution_chart called")
     
-    prices = ticker_data.iloc[:, 0].astype(float) # Ensure numbers
-    #print("prices: ", prices)
+    # Clean data in case it's not done before
+    data = returns.replace([np.inf, -np.inf], np.nan).dropna()
     
-    # Calculate log returns
-    log_returns = np.log(prices / prices.shift(1)).dropna()
-    #ticker_name = log_returns.columns[0]
-    
-    # Clean data in case it's not done before (should be done in app.py though)
-    data = log_returns.replace([np.inf, -np.inf], np.nan).dropna()
-    #data = log_returns[ticker_name].values
+    # If DataFrame, convert to Series by selecting first column
+    if isinstance(data, pd.DataFrame):
+        data = data.iloc[:, 0]
     
     # If there's no data left, return a blank figure with a message
     if data.empty:
@@ -380,7 +421,7 @@ def create_returns_distribution_chart(ticker_data):
     
     fig.add_trace(go.Histogram(
         x=data.tolist(),
-        name='Return Frequency',
+        name='Return frequency',
         histnorm='probability density',
         marker=dict(
             color='#007BFF',
@@ -420,10 +461,8 @@ def create_returns_distribution_chart(ticker_data):
             ))
 
     fig.update_layout(
-        title=f"Log Returns Distribution",
-        #title=f"Log Returns Distribution: {ticker_name}",
-        xaxis_title="Daily Log Return",
-        yaxis_title="Frequency",
+        xaxis_title="Daily returns",
+        yaxis_title="Density",
         template="plotly_white",
         bargap=0.05,
         xaxis=dict(tickformat=".2%")

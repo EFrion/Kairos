@@ -21,7 +21,8 @@ def test_feature():
     
     cache_dir = current_app.config['DATA_FOLDER']
     
-    print("cache_dir: ", cache_dir)
+    #print("cache_dir: ", cache_dir)
+    
 
     stocks_data_path_fallback = os.path.join(cache_dir, 'stocks_price_history_4h.csv')
     stocks_data_path = os.path.join(cache_dir, 'stocks_price_history_1d.csv')
@@ -29,7 +30,7 @@ def test_feature():
     
     #print("stocks_data_path: ", stocks_data_path)
 
-    # Check if we have local data
+    # Check if we have local data to get tickers
     if os.path.exists(stocks_data_path) and os.path.getsize(stocks_data_path) > 0:
         try:
             stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
@@ -44,8 +45,6 @@ def test_feature():
         except Exception as e:
             print(f"FAILED TO READ CSV: {e}")
             
-        tickers = sorted(stocks_data_fallback.columns.tolist())
-        print("tickers: ", tickers)
     
     # If there is no daily data yet, we take the tickers downloaded when we opened the portolio page
     if not tickers_1d:
@@ -57,6 +56,7 @@ def test_feature():
                                             target_start_date=download_start) # Use daily prices here!
         stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
         
+    # Ensure that the tickers from the different datasets are equal
     if not tickers_4h.issubset(tickers_1d):
         print("Syncing 1d columns with 4h columns.")
         download_start = stocks_data_fallback.index.min()
@@ -65,6 +65,21 @@ def test_feature():
                                             interval='1d',
                                             target_start_date=download_start) # Use daily prices here!
         stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
+        
+    # Ensure that the data is up to date
+    last_update_time_stocks = stocks_data.index.max().replace(hour=0, minute=0, second=0, microsecond=0)
+    last_update_time_stocks_fallback = stocks_data_fallback.index.max().tz_localize(None).replace(hour=0, minute=0, second=0, microsecond=0)
+    #print("last_update_time_stocks: ", last_update_time_stocks)
+    #print("last_update_time_stocks_fallback: ", last_update_time_stocks_fallback)
+    if last_update_time_stocks_fallback > last_update_time_stocks: 
+        download_start = last_update_time_stocks
+        print("Updating 1d data from ", download_start)
+        finance_data.fetch_latest_metrics(  list(tickers_1d),
+                                            category_name='stocks',
+                                            interval='1d',
+                                            force_update=True) # Use daily prices here!
+        stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True).dropna()
+         
          
     if stocks_data is not None:
         # Check data integrity
@@ -219,7 +234,7 @@ def sortino_ratio(stocks_data, RISK_FREE_RATE=0.0): #TODO merge with semivarianc
 def get_portfolio_data():
     print("get_portfolio_data called")
     
-    mode = request.args.get('mode', 'heatmap')
+    mode = request.args.get('mode', 'returns')
     if not mode:
         return "No mode provided", 400
     
@@ -228,6 +243,29 @@ def get_portfolio_data():
     stocks_data_path = os.path.join(cache_dir, "stocks_price_history_1d.csv")
     stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True)
     
+    len_data = len(stocks_data.columns)
+    #print("len_data: ", len_data)
+    
+    weights = [1/len_data]*len_data # Equal weight for now
+    #print("weights: ", weights)
+    
+    # Simple returns of the individual stocks
+    simple_returns = stocks_data.pct_change().dropna()
+    print("simple_returns: ", simple_returns)
+    
+    # Simple returns of the portfolio
+    returns_portfolio = simple_returns @ weights
+    print("returns_portfolio: ", returns_portfolio)
+    
+    # Compute portfolio values series by compounding returns
+    portfolio_value = (1+returns_portfolio).cumprod()
+    print("portfolio_value: ", portfolio_value)
+    
+    # Log returns of the portfolio (Continuous compounding rate)
+    log_returns_portfolio = np.log(portfolio_value).diff().dropna()
+    print("log_returns_portfolio: ", log_returns_portfolio)
+    
+    # Log returns of individual stocks
     log_returns = np.log(stocks_data)-np.log(stocks_data.shift(1))
     #print("stocks_data: ", stocks_data)
     
@@ -236,6 +274,8 @@ def get_portfolio_data():
     
     if mode == 'heatmap':
         fig = plotting_utils.plot_correlation_heatmap(correlation_matrix)
+    elif mode == 'returns':
+        fig = plotting_utils.create_returns_distribution_chart(log_returns_portfolio)
     
     fig_json = pio.to_json(fig)
     fig_dict = json.loads(fig_json)
@@ -368,7 +408,7 @@ def get_data():
     if mode == 'price':
         fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20,50,200])
     elif mode == 'returns':
-        fig = plotting_utils.create_returns_distribution_chart(ticker_df)
+        fig = plotting_utils.create_returns_distribution_chart(ticker_log_returns)
     elif mode == 'map-2dcorr':
         t2 = ticker2 if ticker2 else ticker # Fallback to self if none selected
         combined_df = stocks_data[[ticker, t2]].dropna()

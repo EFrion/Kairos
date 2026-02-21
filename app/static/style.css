@@ -355,6 +355,7 @@ table {
 /* Chart container styling */
 .chart-container {
     flex-grow: 1;
+    margin: auto;
     min-height: 500px;
     background: white;
     padding: 0px;
@@ -387,16 +388,39 @@ table {
     flex-direction: column;
 }
 
-.tab {
+.portfolio-plot-container{
+    width: 100%; 
+    height: 100%;
+    position: relative;
+}
+
+.analysis-tabs{
+    display: flex;
+    border-bottom: 1px solid #ddd;
+    background: #f8f9fa;
+}
+
+.tab, .portfolio-tab{
     font-weight: bold;
     font-size: 0.9em;
     transition: background 0.2s;
+    color: #888;
+    cursor: pointer;
+    padding: 10px 20px;
+    border-right: 1px solid #ddd;
 }
-.tab:hover {
+.tab:hover, .portfolio-tab:hover{
     background: #e9ecef;
+    color: #555;
 }
-.active-tab {
+.active-tab, .portfolio-active-tab{
+    font-weight: bold;
     background: white !important;
     border-bottom: 2px solid #007BFF;
-    color: #007BFF;
+    color: #007BFF !important;
+}
+
+#history-controls{
+    padding-right: 10px;
+    font-size: 0.85em;
 }

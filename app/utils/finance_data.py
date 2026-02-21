@@ -413,7 +413,7 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
         cache_dir = current_app.config['DATA_FOLDER']
     else:
         cache_dir = current_app.config['TEST_FOLDER']
-    print("cache_dir: ", cache_dir)
+    #print("cache_dir: ", cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
     price_cache_path    = os.path.join(cache_dir, f"{category_name}_price_history_{interval}.csv") # Interval is 4h for intraday monitoring portfolio, 1d for backtesting
     info_cache_path     = os.path.join(cache_dir, f"{category_name}_metrics_static.json")
@@ -472,32 +472,35 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
     # Check if historical prices are needed
     if target_start_date:
         target_ts = pd.to_datetime(target_start_date).tz_localize(None)
-        print("target_ts: ", target_ts)
+        #print("target_ts: ", target_ts)
    
         # Ensure timezones match
         if current_tz:
             print("Yes current tz")
             target_ts = target_ts.tz_localize(current_tz)
-            print("target_ts2: ", target_ts)
+            now = pd.Timestamp.now(tz=current_tz)
+            #print("target_ts2: ", target_ts)
             if first_datetime:
                 first_datetime = first_datetime.tz_localize(current_tz)
         else:
             print("No current tz")
             target_ts = target_ts.tz_localize('UTC')
-            print("target_ts2: ", target_ts)
+            now = pd.Timestamp.now(tz='UTC')
+            #print("target_ts2: ", target_ts)
             if first_datetime:
                 first_datetime = first_datetime.tz_localize('UTC')
             
-        #print("target_ts: ", target_ts)
-        #print("first_datetime: ", first_datetime)
+        print("target_ts: ", target_ts)
+        print("first_datetime: ", first_datetime)
+        print("now: ", now)
         
         # If the target date is earlier than the cached date, fill the gap
         if first_datetime is None or target_ts < first_datetime:
-            print(f"Backfilling history from {target_ts} to {first_datetime or 'now'}")
+            print(f"Backfilling history from {target_ts} to {first_datetime or now}")
             
             # Download the older data
             # end_date is the start of the current data to avoid overlapping the whole set
-            backfill_end = first_datetime if first_datetime else datetime.now()
+            backfill_end = first_datetime if first_datetime else now
             #print("backfill_end: ", backfill_end)
             
             historical_gap = yf.download(tickers_list, start=target_ts, end=backfill_end, 
@@ -541,7 +544,9 @@ def fetch_latest_metrics(tickers_list, category_name='assets', test=False, requi
     # Determine if we need an update
     needs_price_download = False
     if interval=="1d":
-        needs_price_download = datetime.now() - last_update_time > timedelta(days=1)
+        diff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - last_update_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        #print("diff: ", diff)
+        needs_price_download = diff > timedelta(days=1)
     else:
         needs_price_download = datetime.now() - last_update_time > timedelta(hours=4)
     #needs_price_download, download_start = check_price_cache_status(hist_prices, tickers_list, required_days) #TODO remove?

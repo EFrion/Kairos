@@ -14,14 +14,20 @@
 
     <h1>{{ title }}</h1>
     
-    <div class="chart-container" style="margin: auto;">
-        <div class="analysis-tabs" style="display: flex; border-bottom: 1px solid #ddd; background: #f8f9fa;">
-            <div class="portfolio-tab portfolio-active-tab" data-mode="heatmap" style="padding: 10px 20px; cursor: pointer; border-right: 1px solid #ddd;">Correlation</div>
-            <div class="portfolio-tab" data-mode="returns" style="padding: 10px 20px; cursor: pointer; color: #888; border-right: 1px solid #ddd;">Log Returns</div>
+    <div class="chart-container">
+        <div class="analysis-tabs">
+            <div class="portfolio-tab portfolio-active-tab" data-mode="returns">Log Returns</div>
+            <div class="portfolio-tab" data-mode="heatmap">Correlation</div>
+        </div>
+     
+        <div id="history-controls">
+            <label for="start-date">Missing data? Backfill from:</label>
+            <input type="date" id="start-date" name="start-date" style="font-size: 0.9em;">
+            <button id="expand-btn" style="padding: 2px 8px; cursor: pointer; background: #007BFF; color: white; border: none; border-radius: 3px;">Expand</button>
         </div>
     
         <h2 id="portfolio-chart-title" style="margin: 0; padding:20px;"></h2>
-        <div id="portfolio-plot-container" style="width: 100%; height: auto; position: relative;">
+        <div id="portfolio-plot-container">
         </div>
     </div>
     
@@ -56,18 +62,13 @@
         </div>
 
         <div class="chart-container">
-            <div class="analysis-tabs" style="display: flex; border-bottom: 1px solid #ddd; background: #f8f9fa;">
-                <div class="tab active-tab" data-mode="price" style="padding: 10px 20px; cursor: pointer; border-right: 1px solid #ddd;">Price Chart</div>
-                <div class="tab" data-mode="returns" style="padding: 10px 20px; cursor: pointer; color: #888; border-right: 1px solid #ddd;">Log Returns</div>
-                <div class="tab" data-mode="map-2dcorr" style="padding: 10px 20px; cursor: pointer; color: #888;">2D correlation</div>
-                <div class="tab" data-mode="sentiment" style="padding: 10px 20px; cursor: pointer; color: #888;">Sentiment (Soon)</div>
+            <div class="analysis-tabs">
+                <div class="tab active-tab" data-mode="price">Price Chart</div>
+                <div class="tab" data-mode="returns">Log Returns</div>
+                <div class="tab" data-mode="map-2dcorr">2D correlation</div>
+                <div class="tab" data-mode="sentiment">Sentiment (Soon)</div>
             </div>
-            
-            <div id="history-controls" style="padding-right: 10px; font-size: 0.85em;">
-                <label for="start-date">Backfill to:</label>
-                <input type="date" id="start-date" name="start-date" style="font-size: 0.9em;">
-                <button id="expand-btn" style="padding: 2px 8px; cursor: pointer; background: #007BFF; color: white; border: none; border-radius: 3px;">Expand</button>
-            </div>
+
         
             <h2 id="chart-title" style="margin: 0; padding:20px;">{{ selected_ticker }}</h2>
             <div id="price-plot-container">
@@ -217,7 +218,7 @@
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             // Portfolio variables
-            let portfolioMode = "heatmap"; // Default portfolio mode
+            let portfolioMode = "returns"; // Default portfolio mode
             const portfolioTabs = document.querySelectorAll('.portfolio-tab');
             
             // Tickers variables
