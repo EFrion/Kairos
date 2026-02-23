@@ -9,7 +9,6 @@ bp = Blueprint('portfolio', __name__)
 @bp.route('/', methods=['GET', 'POST'])   
 def portfolio_feature(): 
     #print("portfolio_feature called")
-    print("hey hey")
     
     data = get_full_portfolio_data()
     
@@ -78,10 +77,10 @@ def get_full_portfolio_data():
     return {
         'portfolio': portfolio_data,
         'total_market_value': total_market_value,
-        'total_cost_basis':grand_total_cost_basis,
+        'total_cost_basis': grand_total_cost_basis,
         'grand_total_with_cash': grand_total_with_cash,
         'free_cash_value': free_cash,
-        'monthly_div_plot':dividend_plot,
+        'monthly_div_plot': dividend_plot,
         'monthly_payment_counts': stock_stuff['totals']['monthly_payment_counts'],
         'total_monthly_dividend_payout': stock_stuff['totals']['total_monthly_dividend_payout']
     }
@@ -228,7 +227,7 @@ def create_monthly_dividends_plot(stock_metrics, current_shares):
     # Return the HTML string that can be inserted directly into the template
     return fig.to_html(full_html=False, include_plotlyjs='cdn')  #TODO change to json
     
-@bp.route('/update_portfolio_cache')
+@bp.route('/update_portfolio_cache', methods=['POST'])
 def update_portfolio_cache():
     """
         Loads cached data when app opens.
@@ -237,10 +236,19 @@ def update_portfolio_cache():
     for asset_type in asset_classes:
         tickers = get_assets(asset_type)
         # Here call the function with force_update=True to trigger the update logic
-        finance_data.fetch_latest_metrics(  tickers, asset_type,
+        metrics = finance_data.fetch_latest_metrics(  tickers, asset_type,
                                             interval='4h', force_update=True)
                                             
     updated_data = get_full_portfolio_data()
+        
+    # Update dividend plot
+    if asset_type == 'stocks':
+        data = request.get_json()
+        asset_items = data.get('assets', [])
+        current_shares  = {item['ticker']: float(item['shares']) for item in asset_items}
+        fig = plotting_utils.create_monthly_dividends_figure(metrics, current_shares)
+        updated_data['plot_data'] = fig.to_json()
+    
     return jsonify(updated_data)
      
 @bp.route('/update_portfolio_data/<asset_type>', methods=['POST'])
