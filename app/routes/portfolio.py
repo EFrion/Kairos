@@ -9,6 +9,7 @@ bp = Blueprint('portfolio', __name__)
 @bp.route('/', methods=['GET', 'POST'])   
 def portfolio_feature(): 
     #print("portfolio_feature called")
+    print("hey hey")
     
     data = get_full_portfolio_data()
     
