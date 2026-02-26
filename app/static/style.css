@@ -388,12 +388,59 @@ table {
     flex-direction: column;
 }
 
-.portfolio-plot-container{
+#portfolio-plot-container{
     width: 100%; 
     height: 100%;
     position: relative;
+    min-height: 400px;
 }
 
+/* Spinner */
+.loader {
+    border: 5px solid #f3f3f3;
+    border-top: 5px solid #3498db;
+    border-radius: 50%;
+    width: 50px; height: 50px;
+    animation: spin 2s linear infinite;
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 10;
+}
+
+@keyframes spin {
+    0% { transform: translate(-50%, -50%) rotate(0deg); }
+    100% { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+/* Hidden by default */
+.hidden { display: none !important;}
+
+/* New class to keep space reserved */
+.invisible-placeholder {
+    visibility: hidden !important;
+    opacity: 0;
+    pointer-events: none; /* Prevents clicking the button while hidden */
+}
+
+/* Refresh button */
+.btn-secondary {
+    visibility: visible;
+    background-color: #f8f9fa;
+    color: #007BFF;
+    border: 1px solid #007BFF;
+    padding: 5px 12px;
+    font-size: 0.85em;
+    border-radius: 20px; /* Pill shape */
+    transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+    background-color: #007BFF;
+    color: white;
+}
+
+/* Test headers tabs */
 .analysis-tabs{
     display: flex;
     border-bottom: 1px solid #ddd;

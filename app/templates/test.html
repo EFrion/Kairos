@@ -7,28 +7,37 @@
 
 <body>
     <div class="nav">
-        <a href="/cashflow">Cash Flow</a>
-        <a href="/portfolio">Portfolio Metrics</a>
-        <a href="/test">Optimisation & Backtesting</a>
+        <a href="/cashflow">Cash flow</a>
+        <a href="/portfolio">Portfolio monitoring</a>
+        <a href="/test">Optimisation & backtesting</a>
     </div>
 
     <h1>{{ title }}</h1>
     
     <div class="chart-container">
-        <div class="analysis-tabs">
-            <div class="portfolio-tab portfolio-active-tab" data-mode="returns">Returns</div>
-            <div class="portfolio-tab" data-mode="heatmap">Correlation</div>
-            <div class="portfolio-tab" data-mode="efficient_frontier">Efficient frontier</div>
-        </div>
-     
-        <div id="history-controls">
+             
+        <div id="history-controls"style="padding: 10px 10px;>
             <label for="start-date">Missing data? Backfill from:</label>
             <input type="date" id="start-date" name="start-date" style="font-size: 0.9em;">
             <button id="expand-btn" style="padding: 2px 8px; cursor: pointer; background: #007BFF; color: white; border: none; border-radius: 3px;">Expand</button>
         </div>
     
-        <h2 id="portfolio-chart-title" style="margin: 0; padding:20px;"></h2>
+        <div class="analysis-tabs">
+            <div class="portfolio-tab portfolio-active-tab" data-mode="returns">Returns</div>
+            <div class="portfolio-tab" data-mode="heatmap">Correlation</div>
+            <div class="portfolio-tab" data-mode="efficient_frontier">Efficient frontier</div>
+        </div>
+        
+        <div id="tab-actions" style="padding-top: 10px;">
+            <button id="refresh-frontier-btn" class="btn-secondary invisible-placeholder">
+                Update Frontier
+            </button>
+        </div>
+
+    
+        <h2 id="portfolio-chart-title" style="margin: 0; padding:10px;"></h2>
         <div id="portfolio-plot-container">
+            <div id="loader" class="loader hidden"></div>
         </div>
     </div>
     
@@ -64,10 +73,10 @@
 
         <div class="chart-container">
             <div class="analysis-tabs">
-                <div class="tab active-tab" data-mode="price">Price Chart</div>
-                <div class="tab" data-mode="returns">Log Returns</div>
+                <div class="tab active-tab" data-mode="price">Price chart</div>
+                <div class="tab" data-mode="returns">Returns</div>
                 <div class="tab" data-mode="map-2dcorr">2D correlation</div>
-                <div class="tab" data-mode="sentiment">Sentiment (Soon)</div>
+                <div class="tab" data-mode="sentiment">Sentiment (soon)</div>
             </div>
 
         
@@ -99,35 +108,17 @@
             
             <tbody>
                 <tr>
+                    {% for metric_name, metric_data in individual_metrics.items() %}
                     <td>
-                        <span id="sharpe-ratio-display">
-                            {% if sharpe[selected_ticker] is defined %}
-                                {{ "%.2e"|format(sharpe[selected_ticker]) }}
+                        <span id="{{ metric_name }}-display">
+                            {% if metric_data[selected_ticker] is defined %}
+                                {{ "%.2e"|format(metric_data[selected_ticker]) }}
                             {% else %}
                                 0.0
                             {% endif %}
                         </span>
                     </td>
-
-                    <td>
-                        <span id="semivariance-display">
-                            {% if semivariance[selected_ticker] is defined %}
-                                {{ "%.2e"|format(semivariance[selected_ticker]) }}
-                            {% else %}
-                                0.0
-                            {% endif %}
-                        </span>
-                    </td>
-
-                    <td>
-                        <span id="sortino-ratio-display">
-                            {% if sortino[selected_ticker] is defined %}
-                                {{ "%.2e"|format(sortino[selected_ticker]) }}
-                            {% else %}
-                                0.0
-                            {% endif %}
-                        </span>
-                    </td>
+                    {% endfor %}
 
                     <td>
                         <span id="symmetry-score-display">
@@ -221,6 +212,8 @@
             // Portfolio variables
             let portfolioMode = "returns"; // Default portfolio mode
             const portfolioTabs = document.querySelectorAll('.portfolio-tab');
+            const loader = document.getElementById('loader');
+            const refreshBtn = document.getElementById('refresh-frontier-btn');
             
             // Tickers variables
             let currentTicker = "{{ selected_ticker }}";
@@ -233,33 +226,49 @@
             updatePortfolioView();
             
             // Portfolio logic
-            function updatePortfolioView() {
+            function updatePortfolioView(force = false) {
+                // Show loader, hide plot
+                loader.classList.remove('hidden');
+                
+                // Show/hide refresh button only for frontier
+                if (portfolioMode === 'efficient_frontier') {
+                    refreshBtn.classList.remove('invisible-placeholder');
+                } else {
+                    refreshBtn.classList.add('invisible-placeholder');
+                }
+        
                 const container = document.getElementById('portfolio-plot-container');
                 const title = document.getElementById('portfolio-chart-title');
                 
                 title.innerText = `${portfolioMode.toUpperCase().replace(/[^A-Z ]/g, ' ')}`;
 
+                const url = `/get_portfolio_data?mode=${portfolioMode}&force_update=${force}`;
+                
                 // Fetching data for the whole portfolio
-                fetch(`/get_portfolio_data?mode=${portfolioMode}`)
+                fetch(url)
                     .then(res => res.json())
                     .then(data => {
-                        if (portfolioMode === 'heatmap'){
-                            Plotly.react(container, data.fig_data.data, data.fig_data.layout, { displayModeBar: false });
-                        } else{
-                            Plotly.react(container, data.fig_data.data, data.fig_data.layout);
-                        }
+                        loader.classList.add('hidden'); // Hide loader
+                        const config = (portfolioMode === 'heatmap') ? { displayModeBar: false } : {};
+                        Plotly.react(container, data.fig_data.data, data.fig_data.layout, config);
                     })
-                    .catch(err => console.error("Portfolio Plot Error:", err));
+                    .catch(err => {
+                        loader.classList.add('hidden');
+                        console.error("Portfolio plot error:", err);
+                    });
             }
+            
+            // Refresh button listener
+            refreshBtn.addEventListener('click', () => updatePortfolioView(true));
 
-            // Portfolio Tab Click Listener
+            // Portfolio tab click listener
             portfolioTabs.forEach(tab => {
                 tab.addEventListener('click', function() {
                     portfolioTabs.forEach(t => t.classList.remove('portfolio-active-tab'));
                     this.classList.add('portfolio-active-tab');
                     
                     portfolioMode = this.dataset.mode;
-                    updatePortfolioView();
+                    updatePortfolioView(false); // Use cache by default
                 });
             });
             
@@ -291,7 +300,7 @@
                         Plotly.react(container, data.fig_data.data, data.fig_data.layout);
                         
                         // Update Sharpe ratio
-                        const sharpeRatio = document.getElementById('sharpe-ratio-display');
+                        const sharpeRatio = document.getElementById('sharpe-display');
                         if (sharpeRatio && data.sharpe) {
                             sharpeRatio.innerText = data.sharpe;
                         }
@@ -303,7 +312,7 @@
                         }
                         
                         // Update Sortino ratio
-                        const sortinoRatio = document.getElementById('sortino-ratio-display');
+                        const sortinoRatio = document.getElementById('sortino-display');
                         if (sortinoRatio && data.sortino) {
                             sortinoRatio.innerText = data.sortino;
                         }

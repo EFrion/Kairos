@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import plotly.io as pio
 import numpy as np
+import pickle
 from scipy import stats
 from scipy.optimize import minimize
 from datetime import datetime, date, timedelta
@@ -96,31 +97,23 @@ def test_feature():
         print("selected_ticker: ", selected_ticker)
     else:
         return "Error: historical prices could not be loaded.", 404
-    
-    sharpe = sharpe_ratio(stocks_data, RISK_FREE_RATE=0.0)
-    semivar = semivariance(stocks_data)
-    sortino = sortino_ratio(stocks_data, RISK_FREE_RATE=0.0)
-    
-#    # Check data integrity
-#    if ~stocks_value_data:
-#        print("No NaN in stocks data")
-#        
-#        # Gives some information. To be improved!
-#        investments, stocks_simple_returns, stocks_log_returns  = investCompare(
-#            stocks_data,
-#            date(2025, 1, 16),
-#            date(2026, 1, 16),
-#            {"MAN", "SLF"}, # Test sample
-#        )
-#        
-    
+
+    # Check data integrity
+    if stocks_value_data:
+        print("NaN in data! Careful")
+        
+    individual_metrics = {}
+    individual_metrics = {
+        'sharpe': sharpe_ratio(stocks_data, RISK_FREE_RATE=0.0),
+        'semivar': semivariance(stocks_data),
+        'sortino': sortino_ratio(stocks_data, RISK_FREE_RATE=0.0)
+    }
+    print("individual_metrics: ", individual_metrics)
     
     return render_template( 'test.html',
                             tickers=tickers,
                             selected_ticker=selected_ticker,
-                            sharpe=sharpe,
-                            semivariance=semivar,
-                            sortino=sortino,
+                            individual_metrics=individual_metrics,
                             title='Portfolio Optimisation & Backtesting')
 
 
@@ -131,9 +124,12 @@ def get_portfolio_data():
     mode = request.args.get('mode', 'returns')
     if not mode:
         return "No mode provided", 400
+        
+    force_update = request.args.get('force_update') == 'true' # Check for button click
     
     # Load data. TODO data persistence?
     cache_dir = current_app.config['DATA_FOLDER']
+    cache_path = os.path.join(cache_dir, "frontier_cache.pkl")
     stocks_data_path = os.path.join(cache_dir, "stocks_price_history_1d.csv")
     stocks_data = pd.read_csv(stocks_data_path, index_col='Datetime', parse_dates=True)
     
@@ -218,9 +214,28 @@ def get_portfolio_data():
     elif mode == 'returns':
         fig = plotting_utils.create_returns_distribution_chart(log_returns_portfolio)
     elif mode == 'efficient_frontier':
-        optimisation_results = perform_static_optimisation(annual_simple_returns, annualised_cov, weights, bounds, constraints, simple_returns, 0.0, 100, empty_series, 0.0)
-        #print("opt std: ", optimisation_results['efficient_frontier_std_devs'])
-        #print("opt ret: ", optimisation_results['efficient_frontier_returns'])
+        optimisation_results = None
+        
+        # Load from cache
+        if not force_update and os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'rb') as f:
+                    optimisation_results = pickle.load(f)
+                print("Loaded frontier from cache")
+            except:
+                optimisation_results = None
+                
+        # Perform optimisation
+        if optimisation_results is None:
+            print("Calculating efficient frontier")
+            optimisation_results = perform_static_optimisation(annual_simple_returns, annualised_cov, weights, bounds, constraints, simple_returns, 0.0, 100, empty_series, 0.0)
+            
+            # Save to cache
+            with open(cache_path, 'wb') as f:
+                pickle.dump(optimisation_results, f)
+            #print("opt std: ", optimisation_results['efficient_frontier_std_devs'])
+            #print("opt ret: ", optimisation_results['efficient_frontier_returns'])
+            
         fig = plotting_utils.plot_efficient_frontier_and_portfolios(optimisation_results, individual_stock_metrics)
     
     fig_json = pio.to_json(fig)
