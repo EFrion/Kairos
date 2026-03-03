@@ -173,7 +173,7 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
         data.update({
             "Currency": currency,
             "Sector": info.get('sector'),
-            "PayoutRatio": info.get('payoutRatio'),
+            "PayoutRatio": round(info['payoutRatio'], 4) if isinstance(info.get('payoutRatio'), (int, float)) else 0.0,
             "P/E": round(info['trailingPE'], 2) if isinstance(info.get('trailingPE'), (int, float)) else 0.0,
             "Fwd_P/E": round(info['forwardPE'], 2) if isinstance(info.get('forwardPE'), (int, float)) else 0.0,
             "P/B": round(info['priceToBook'], 2) if isinstance(info.get('priceToBook'), (int, float)) else 0.0
@@ -187,7 +187,7 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
             #print("hist_prices[ticker]: ", hist_prices[ticker])
             #print("len(hist_prices): ", len(hist_prices))
             data["Quote"] = hist_prices[ticker].dropna().iloc[-1] # Get original quote
-            data["Quote_EUR"] = round(float(data["Quote"] * rate),2) # Get quote in euro (because I'm French :) )
+            data["Quote_EUR"] = float(data["Quote"] * rate) # Get quote in euro (because I'm French :) )
             #print(f"Last close for {ticker}: {data["Quote"]}")
             #print(f"rate for {ticker}: {rate}")
             
@@ -382,7 +382,7 @@ def get_sector_pb_benchmark(sector, cache_dir, required_days: int =7):
         
         # Update the dict if new value
         if "pb_bench_dates" not in bench_data:
-            data["pb_bench_dates"] = {}
+            bench_data["pb_bench_dates"] = {}
         if "benchmarks" not in bench_data:
             bench_data["benchmarks"] = {}
             

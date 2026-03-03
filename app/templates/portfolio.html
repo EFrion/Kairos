@@ -14,23 +14,19 @@
         <a href="/portfolio">Portfolio Metrics</a>
         <a href="/test">Optimisation & Backtesting</a>
         
-        <div class="dropdown" style="float: right; margin-right: 20px; position: relative;">
-            <button class="btn btn-outline-secondary" type="button" id="bellBtn">
-                🔔 <span id="bell-badge" class="badge bg-danger" style="display:none;">0</span>
+        <div style="float: right; margin-right: 20px; position: relative;">
+            <button type="button" id="bellBtn">
+                🔔 <span id="bell-badge" style="display:none;">0</span>
             </button>
-            <ul class="dropdown-menu dropdown-menu-end"
-                id="notification-list"
-                style="width: 320px; display: none; position: absolute; right:0; left: auto; z-index: 9999; background: white; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #ddd;"">
-                <div id="notification-footer" style="display:none; border-top: 1px solid #ddd; padding: 10px; text-align: center;">
-                    <button class="btn btn-sm btn-outline-danger" onclick="clearAllNotifications()">Clear All</button>
-                </div>
+            <ul id="notification-list"
+                style="width: 320px; display: none; position: absolute; right:0; left: auto; z-index: 9999; background: white; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #ddd;">
             </ul>
         </div>
     </div>
 
     <h1>{{ title }}</h1>
     
-    <div class="summary-container" style="display: flex; align-items: center; justify-content: space-around; background: #2c3e50; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+    <div style="display: flex; align-items: center; justify-content: space-around; background: #2c3e50; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
         <div style="text-align: center; padding: 10px;">
             <h2 style="margin: 0; text-align: center; font-size: 1.2em; color: #3498db;">Available Cash</h2>
             <div style="position: relative; display: inline-block;">
@@ -56,53 +52,39 @@
     </div>
         
     <form method="POST" action="{{ url_for('portfolio.portfolio_feature') }}">
-        <div id="stocks-section">
-            <div class="table-container">
-                {{ utils.asset_table(   "Stocks",
-                                        portfolio.stocks.assets,
-                                        portfolio.stocks.total_market_value,
-                                        "stocks",
-                                        portfolio.stocks.total_cost_basis,
-                                        portfolio.stocks.monthly_income_data.counts,
-                                        portfolio.stocks.portfolio_yield_data.div_yield,
-                                        portfolio.stocks.portfolio_yield_data.div_growth,
-                                        portfolio.stocks.annual_dividends
-                                    ) }}
-            </div>
-        </div>
-
-        <div id="crypto-section" style="margin-top: 40px;">
-            <div class="table-container">
-                {{ utils.asset_table(   "Crypto",
-                                        portfolio.crypto.assets,
-                                        portfolio.crypto.total_market_value,
-                                        "crypto",
-                                        portfolio.crypto.total_cost_basis,
-                                        [],
-                                        [],
-                                        []
-                                    ) }}
-            </div>
-        </div>
+        {% for asset_type in ['stocks', 'crypto'] %}
+            {% set port = portfolio[asset_type] %}
+            {% call(part) utils.table_container(asset_type|capitalize ~ ' Portfolio', asset_type) %}
+                {% if part == 'header' %}
+                    <tr>
+                        {% for col in port.assets[0].get_schema() %}
+                            <th>{{ col.label }}</th>
+                        {% endfor %}
+                    </tr>
+                {% elif part == 'body' %}
+                    {% for asset in port.assets %} {{ utils.asset_row(asset) }} {% endfor %}
+                {% elif part == 'footer' %}
+                    {{ utils.render_footer(port, asset_type) }}
+                {% endif %}
+            {% endcall %}
+        {% endfor %}
     </form>
 
 
 
-    <div class="input-section" style="margin-bottom: 20px;">
+    <div style="margin-bottom: 20px;">
         <button id="add-ticker-btn" style="padding: 10px 20px; font-size: 16px; cursor: pointer;">
                 + Add New <span id="category-label">Ticker</span>
         </button>
         
         <div id="category-selector" style="display: none; margin-top: 10px;">
-            <button class="category-choice" data-category="stocks">Stocks</button>
-            <button class="category-choice" data-category="crypto">Crypto</button>
+            <button data-category="stocks">Stocks</button>
+            <button data-category="crypto">Crypto</button>
         </div>
         
         <form id="ticker-form" method="POST" action="/add/stocks" 
               style="display: none; padding: 20px; border: 1px solid #ccc; border-radius: 5px; margin-top: 15px;">
             <input type="hidden">
-            
-<!--            <h3 id="form-title">Add to <span id="form-category-name">Stocks</span></h3>-->
             
             <div class="form-group">
                 <label>Symbol:</label>
@@ -124,6 +106,9 @@
     {% endif %}
     
     <script>
+        window.INITIAL_PORTFOLIO_DATA = {
+            portfolio: {{ portfolio.to_dict() | tojson }}
+        };
         let portfolioUpdateController = null;
         
         function getTickersFromPage() {
@@ -154,8 +139,8 @@
             let assets = [];
             
             //console.log("collectTableData called");
-            // Find all hidden inputs named "tickers" that are currently in the table
-            // This automatically handles additions and deletions
+            // Find hidden inputs named "tickers" in the table
+            // Handles additions and deletions
             const tickerInputs = document.querySelectorAll('input[name="tickers"]');
     
             // Find all rows (tr) in the table body
@@ -169,10 +154,6 @@
                 const socInput = document.querySelector(`input[name="soc_${ticker}"]`);
                 const govInput = document.querySelector(`input[name="gov_${ticker}"]`);
                 const contInput = document.querySelector(`input[name="cont_${ticker}"]`);
-                
-                //console.log("sharesInput: ", sharesInput);
-                //console.log("priceInput: ", priceInput);
-                //console.log("envInput: ", envInput);
 
                 if (sharesInput) {
                     // Default ESG values to 0
@@ -203,52 +184,6 @@
             return { assets: assets };
         }
         
-        function recalculateWeights(totalMarketValue, assetType) {
-            //console.log("recalculateWeights called for:", assetType);
-            // Check if the total market value is zero to prevent division by zero
-            if (totalMarketValue <= 0) return;
-            
-            // Only select value cells within the specific section (stocks or crypto)
-            const section = document.getElementById(`${assetType}-section`);
-            //console.log("section: ", section);
-            if (!section) return;
-            
-            // Find all weight display elements only within this section
-            const weightElements = section.querySelectorAll('.weight-display');
-
-            weightElements.forEach(elem => {
-                // Find the market value for this specific row
-                const ticker = elem.id.replace('weight_', '');
-                const valueElem = document.getElementById(`value_${ticker}`);
-                
-                if (valueElem && totalMarketValue > 0) {
-                    const marketValue = parseFloat(valueElem.getAttribute('data-market-value')) || 0;
-                    const weight = (marketValue / totalMarketValue) * 100;
-                    
-                    elem.classList.remove('bg-red', 'bg-orange', 'bg-green');
-                    
-                    if (assetType === 'stocks') {
-                        if (weight <= 4) {
-                            elem.classList.add('bg-green');
-                        } else if (weight <= 5) {
-                            elem.classList.add('bg-orange');
-                        } else {
-                            elem.classList.add('bg-red');
-                        }
-                    }
-                    
-                    // Smart weight formatting (#TODO fix some displays)
-                    if (weight > 0 && weight < 0.01) {
-                        elem.textContent = weight.toExponential(2) + ' %';
-                    } else {
-                        elem.textContent = weight.toFixed(2) + ' %';
-                    }
-                } else {
-                    elem.textContent = '0.00%';
-                    elem.classList.remove('bg-red', 'bg-orange', 'bg-green');
-                }
-            });
-        }
 
         // Function to send data to Flask and update the plot
         function updatePortfolioUI(assetType, ticker = null, externalData = null) {
@@ -256,7 +191,7 @@
             
             if (externalData) {
                 console.log("Using external data to update UI.");
-                processPortfolioResponse(assetType, externalData, ticker);
+                PortfolioUI.update({ portfolio: externalData }, assetType);
                 return; 
             }
             
@@ -279,8 +214,8 @@
                 signal: signal
             })
             .then(response => response.json())
-            .then(data => {                
-                processPortfolioResponse(assetType, data, ticker);
+            .then(portfolio => {                
+                PortfolioUI.update(portfolio, assetType, ticker);
                 portfolioUpdateController = null;
             })                
             .catch(error => {
@@ -288,142 +223,224 @@
                 if (error.name === 'AbortError') {
                     console.log('Fetch aborted: newer input received.');
                 } else {
-                    console.error(`Error updating ${assetType} data:`, error);
+                    console.error(`Error updating ${assetType} portfolio:`, error);
                 }
             });
         }
         
-        function processPortfolioResponse(assetType, data, ticker) {
-            console.log('processPortfolioResponse: ', assetType);
-    
-            // Update category-specific totals
-            const marketValueElem = document.getElementById(`total-market-value-${assetType}`);
-            const costBasisElem = document.getElementById(`total-cost-basis-${assetType}`);
-                        
-            if (marketValueElem && data.total_market_value !== undefined) {
-                marketValueElem.textContent = smartFormat(data.total_market_value);
-            }
-            if (costBasisElem && data.total_cost_basis !== undefined) {
-                costBasisElem.textContent = smartFormat(data.total_cost_basis);
-            }
+        const PortfolioUI = {
+            init() {
+                this.setupListeners();
+                this.hydrateInitialData();
+            },
             
-            // Asset-specific logic (dividends for stocks only)
-            if (assetType === 'stocks') {
-                const yieldElem = document.getElementById('portfolio-yield-display');
-                const divGrowthElem = document.getElementById('portfolio-div-growth-display');
-                const annDivElem = document.getElementById('annual-dividends');
-                const pyield = data.portfolio_yield;
-                const growth = data.portfolio_div_growth;
-                const annDiv = data.annual_dividends;
-                const envInputUpdate = document.querySelector(`input[name="env_${ticker}"]`);
-                const socInputUpdate = document.querySelector(`input[name="soc_${ticker}"]`);
-                const govInputUpdate = document.querySelector(`input[name="gov_${ticker}"]`);
-                const contInputUpdate = document.querySelector(`input[name="cont_${ticker}"]`);
+            handleInputChange(input) {
+                const ticker = input.id.split('_').pop();
+                const section = input.closest('[id$="-section"]');
+                const assetType = section ? section.id.split('-')[0] : 'stocks';
+
+                // Persistent save
+                saveSingleValue(input, ticker, input.value); 
                 
-                const updateColor = (input) => {
-                    if (!input) return;
-                    const val = parseInt(input.value) || 0;
-                    
-                    // Find the parent cell
-                    const parentCell = input.closest('td');
-                    if (!parentCell) return;
-                    
-                    parentCell.classList.remove('bg-red', 'bg-orange', 'bg-green');
-                    
-                    if (val < 4) parentCell.classList.add('bg-red');
-                    else if (val < 7) parentCell.classList.add('bg-orange');
-                    else parentCell.classList.add('bg-green');
-                };
-                updateColor(envInputUpdate);
-                updateColor(socInputUpdate);
-                updateColor(govInputUpdate);
-                updateColor(contInputUpdate);
+                // Server sync (full recalculation)
+                updatePortfolioUI(assetType, ticker);
+            },
             
-                // Update Plotly graph
-                const plotDiv = document.getElementById('monthly-income-plot');
-                if (plotDiv && data.plot_data) {
-                    const newFigure = JSON.parse(data.plot_data); // Re-parse the figure data from JSON sent by Flask
-                    Plotly.react(plotDiv, newFigure.data, newFigure.layout); // Updates data and layout of the existing plot
+            setupListeners() {
+                // Delegate event listening to the table body
+                document.addEventListener('change', (e) => {
+                    // Check if what changed was one of the portfolio inputs
+                    if (e.target.matches('input[id*="_"]')) {
+                        this.handleInputChange(e.target);
+                    }
+                });
+                
+                document.addEventListener('keydown', (e) => {
+                    if (e.target.matches('input[id*="_"]') && e.key === 'Enter') {
+                        handleEnterKey(e); 
+                    }
+                });
+            },
+            
+            // Sync JS with the data Jinja already put in the HTML
+            hydrateInitialData() {
+                // Pass the initial JSON from Python
+                if (window.INITIAL_PORTFOLIO_DATA) {
+                    this.update(window.INITIAL_PORTFOLIO_DATA, 'stocks');
+                }
+            },
+            
+            // Main entry point called after the fetch request
+            update(data, assetType, ticker = null) {
+                if (!data || !data.portfolio) {
+                    console.error("Data structure invalid", data);
+                    return;
                 }
 
-                // Update monthly payment counts
+                const manager = data.portfolio;
+                const subPortfolio = manager[assetType];
+                const summary = manager.summary;
+
+                // Update the grand total
+                this.setText('grand-total-display', currencyFormat(summary.grand_total_with_cash));
+
+                // Update table category totals
+                this.setText(`total-market-value-${assetType}`, currencyFormat(subPortfolio.total_market_value));
+                this.setText(`total-cost-basis-${assetType}`, currencyFormat(subPortfolio.total_cost_basis));
+
+                // Updata stocks metrics
+                if (assetType === 'stocks') {
+                    this.updateStockMetrics(subPortfolio, ticker);
+                }
+
+                // Update all charts
+                this.updateCharts(data, subPortfolio, assetType);
+
+                // Update weights
+                this.updateWeights(subPortfolio);
+
+                // Post-update logic
+                this.monitorStatusChanges();
+            },
+
+            updateWeights(subPortfolio) {
+                subPortfolio.assets.forEach(asset => {
+                    const cellId = `weight_${asset.ticker}`;
+                    this.setMetricWithColor(cellId, asset.weight, [4, 5], 'low_is_better', '%');
+                });
+            },
+
+            updateStockMetrics(stocks, ticker) {
+                const yieldData = stocks.portfolio_yield_data;
+                
+                // Update yield and growth
+                this.setMetricWithColor('portfolio-yield-display', yieldData.div_yield, [2, 4], 'high_is_better', '%');
+                this.setMetricWithColor('portfolio-div-growth-display', yieldData.div_growth, [4, 8], 'high_is_better', '%');
+                this.setText('annual-dividends', currencyFormat(stocks.annual_dividends));
+
+                // Update the monthly payment count grid
                 const dataRow = document.getElementById('total-month-data-row');
-
-                if (dataRow && data.monthly_payment_counts) {
-                    dataRow.innerHTML = ''; // Clears only the spans, not the labels above them
-                    
-                    data.monthly_payment_counts.forEach(count => {
-                        const span = document.createElement('span');
-                        // Add 'paid' class if count > 0 to match the Jinja logic
-                        span.className = `month-data-item total-count-item ${count > 0 ? 'paid' : ''}`;
-                        span.textContent = count;
-                        dataRow.appendChild(span);
-                    });
+                if (dataRow && stocks.monthly_income_data) {
+                    dataRow.innerHTML = stocks.monthly_income_data.counts.map(count => `
+                        <span class="month-data-item ${count > 0 ? 'paid' : ''}">
+                            ${count}
+                        </span>
+                    `).join('');
                 }
                 
-                if (annDiv) annDivElem.textContent = smartFormat(annDiv);
+                // Apply ESG background colours
+                if (ticker) this.applyESGColors(ticker);
+            },
+
+            updateCharts(data, subPortfolio, assetType) {
+                // Update the income plot
+                console.log("updateCharts called for asset type: ", assetType);
+                
+                const manager = data.portfolio;
+                const allTotals = {
+                    stocks: manager.stocks.total_market_value,
+                    crypto: manager.crypto.total_market_value,
+                    cash: manager.summary.free_cash
+                };
+                
+                // Determine sector data. Pass null unless it's stocks
+                let sLabels = assetType === 'stocks' ? subPortfolio.sectors.labels : null;
+                let sValues = assetType === 'stocks' ? subPortfolio.sectors.values : null;
+                
+                createPieCharts(sLabels, sValues, allTotals);
+                            
+                const plotDiv = document.getElementById('monthly-income-plot');
+                if (plotDiv && data.income_plot) {
+                    const figure = (typeof data.income_plot === 'string') 
+                        ? JSON.parse(data.income_plot) 
+                        : data.income_plot;
+                    Plotly.react(plotDiv, figure.data, figure.layout);
+                }
+            },
+
+            // Helper to safely update text content
+            setText(id, text) {
+                const el = document.getElementById(id);
+                if (el) el.textContent = text;
+            },
             
-                if (yieldElem && pyield !== undefined) {                    
-                    // Update text
-                    yieldElem.textContent = (pyield * 100).toFixed(2) + '%';
-
-                    // Update classes without destroying other layout classes
-                    // Remove all possible color classes first
-                    yieldElem.classList.remove('bg-red', 'bg-orange', 'bg-green');
-                    
-                    // Apply the new colour class based on logic
-                    if (pyield < 0.02) {
-                        yieldElem.classList.add('bg-red');
-                    } else if (pyield < 0.04) {
-                        yieldElem.classList.add('bg-orange');
-                    } else {
-                        yieldElem.classList.add('bg-green');
+            applyESGColors(ticker) {
+                ['env', 'soc', 'gov', 'cont'].forEach(key => {
+                    const input = document.querySelector(`input[name="${key}_${ticker}"]`);
+                    if (input) {
+                        const val = parseInt(input.value) || 0;
+                        const cell = input.closest('td');
+                        if (cell) {
+                            cell.className = ''; // Reset classes
+                            if (val < 4) cell.classList.add('bg-red');
+                            else if (val < 7) cell.classList.add('bg-orange');
+                            else cell.classList.add('bg-green');
+                        }
                     }
-                }
-                
-                if (divGrowthElem && growth!== undefined) {    
-                    divGrowthElem.textContent = (growth * 100).toFixed(2) + '%';
+                });
+            },
 
-                    divGrowthElem.classList.remove('bg-red', 'bg-orange', 'bg-green');
-                    
-                    if (growth < 0.04) {
-                        divGrowthElem.classList.add('bg-red');
-                    } else if (growth < 0.08) {
-                        divGrowthElem.classList.add('bg-orange');
-                    } else {
-                        divGrowthElem.classList.add('bg-green');
-                    }
-                }
+            // Helper to set percentage text and background colour based on thresholds
+            setMetricWithColor(id, value, thresholds, direction = 'high_is_better', suffix = '') {
+                const el = document.getElementById(id);
+                if (!el) return;
                 
-                createPieCharts(data.sector_labels, data.sector_values);
+                const displayValue = suffix === '%' ? (value).toFixed(2) : value.toFixed(2);
+                el.textContent = displayValue + suffix;
+                el.classList.remove('bg-red', 'bg-orange', 'bg-green');
+
+                const [low, high] = thresholds;
+
+                if (direction === 'high_is_better') {
+                    if (value < low) el.classList.add('bg-red');
+                    else if (value <= high) el.classList.add('bg-orange');
+                    else el.classList.add('bg-green');
+                } else {
+                    // Low is better
+                    if (value > high) el.classList.add('bg-red');
+                    else if (value >= low) el.classList.add('bg-orange');
+                    else el.classList.add('bg-green');
+                }
+            },
+
+            monitorStatusChanges() {
+                const cells = document.querySelectorAll('.monitor-status');
+                const previousState = JSON.parse(localStorage.getItem('portfolio_state') || "{}");
+                const currentState = {};
+                let hasNewAlerts = false;
+
+                cells.forEach(cell => {
+                    const ticker = cell.getAttribute('data-ticker');
+                    const metric = cell.getAttribute('data-metric');
+                    const stateKey = `${ticker}_${metric}`;
+                    
+                    // Determine status based on class
+                    const currentStatus = cell.classList.contains('bg-green') ? 'good' : 
+                                        cell.classList.contains('bg-orange') ? 'caution' : 'bad';
+                    
+                    currentState[stateKey] = currentStatus;
+
+                    // Compare with the last saved state
+                    if (previousState[stateKey] && previousState[stateKey] !== currentStatus) {
+                        NotificationManager.addStatusAlert(ticker, metric, previousState[stateKey], currentStatus);
+                        hasNewAlerts = true;
+                    }
+                });
+
+                // Save current state
+                localStorage.setItem('portfolio_state', JSON.stringify(currentState));
             }
-            
-            // Recalculate weights for every stock using the new total
-            recalculateWeights(data.total_market_value, assetType);
-            
-            checkStatusChanges();
-        }
+        };
         
-        function createPieCharts(sectorLabels, sectorValues, allCategoryTotals = {}) {
-            // Update Global Asset Allocation Chart
-            const categories = ['stocks', 'crypto']; //TODO add assets
+        function createPieCharts(sectorLabels, sectorValues, allCategoryTotals={}) {
+            // Update global asset allocation chart
+            const categories = ['stocks', 'crypto','cash']; //TODO add assets
             let labels = [];
             let values = [];
 
             categories.forEach(cat => {
-                // Use the passed data if available, otherwise fallback to UI scraping
-                let val = allCategoryTotals[cat];
-        
-                // If val wasn't passed, try to get it from the UI (as a backup)
-                if (val === undefined) {
-                    const elem = document.getElementById(`total-market-value-${cat}`);
-                    if (elem) {
-                        let text = elem.textContent.replace(/\s|&nbsp;/g, '').replace(',', '.');
-                        val = parseFloat(text.replace(/[^0-9.-]/g,"")) || 0;
-                    }
-                }
-
-                if (val > 0) {
+                const val = allCategoryTotals[cat] || 0;
+                if (val>0){
                     labels.push(cat.charAt(0).toUpperCase() + cat.slice(1));
                     values.push(val);
                 }
@@ -431,47 +448,41 @@
                 console.log("val: ", val);
             });
             
-            const cashInput = document.getElementById('free-cash-input');
-            const cashVal = parseFloat(cashInput.value) || 0;
-            if (cashVal > 0) {
-                labels.push('Cash');
-                values.push(cashVal);
-            }
-
-            console.log("createPieCharts Global Allocation called");
-            updatePieChart('asset-allocation-chart', labels, values, 'Global Allocation');
+            updatePieChart('asset-allocation-chart', labels, values, 'Global allocation');
             
             // Update the grand total text at the top
             const grandTotal = values.reduce((a, b) => a + b, 0);
             const grandTotalElem = document.getElementById('grand-total-display');
-            if (grandTotalElem) grandTotalElem.textContent = smartFormat(grandTotal);
+            if (grandTotalElem) grandTotalElem.textContent = currencyFormat(grandTotal);
+            console.log("grandTotalElem: ", grandTotalElem);
             
             if (sectorLabels && sectorValues) {
-                //console.log("createPieCharts Sector Diversification called");
-                updatePieChart('sector-chart', sectorLabels, sectorValues, 'Sector Diversification');
+                updatePieChart('sector-chart', sectorLabels, sectorValues, 'Sector diversification');
             }
         }
             
         function updatePieChart(elementId, labels, values, chartTitle) {
             //console.log("updatePieChart called");
-            // Applies smartFormat to the values inside chart slices
-            const formattedValues = values.map(v => smartFormat(v));
-            //console.log("formattedValues: ", formattedValues);
-    
+            // Applies currencyFormat to the values inside chart slices
+            const formattedValues = values.map(v => currencyFormat(v));
+            const total = values.reduce((sum, v) => sum + v, 0); // Calculate total for percentage calculation
+            const formattedPercentages = values.map(v => ((v / total) * 100).toFixed(2)); // Calculate and format percentages as currency
+            const customText = labels.map((label, i) => `${formattedPercentages[i]}%`);
+
             const data = [{
                 values: values,
                 labels: labels,
                 type: 'pie',
                 hole: .4, // Donut style
-                text: formattedValues,
-                textinfo: "label+percent",
+                text: customText,
+                textinfo: "label+text",
                 textposition: "outside",
                 automargin: false,
                 domain: {
                     x: [0.15, 0.85],
                     y: [0.15, 0.85]  // Gives space at bottom and top (for title)
                 },
-                hovertemplate: "<b>%{label}</b><br>%{text}<br>%{percent}<extra></extra>",
+                hovertemplate: "<b>%{label}</b><br>%{text}<br><extra></extra>",
                 hoverlabel: {
                     align: 'center'
                 },
@@ -506,10 +517,10 @@
         // Function to send a single updated value (shares or price) to the server
         function saveSingleValue(inputElement, ticker, value) {
             //console.log("saveSingleValue called");
-            const fieldType = inputElement.id.split('_')[0]; // 'shares' or 'price'
+            const fieldType = inputElement.id.split('_')[0]; // Remove underscore to get the field
             
             // Determine the asset type by looking at the parent container
-            const assetType = inputElement.closest('[id$="-section"]').id.split('-')[0]; // returns 'stocks' or 'crypto'
+            const assetType = inputElement.closest('[id$="-section"]').id.split('-')[0]; // Return 'stocks' or 'crypto'
     
             // Create a payload that only contains the ticker and the single updated field
             const dataToSend = {
@@ -518,8 +529,6 @@
                 value: parseFloat(value) || 0.0,
                 asset_type: assetType
             };
-            
-            //console.log(`Saving single update: ${fieldType} for ${assetType}, ${ticker} to ${value}`);
 
             fetch(`/save_single_value/${assetType}`, {
                 method: 'POST',
@@ -536,67 +545,27 @@
             })
             .catch(error => console.error('Error saving value:', error));
         }
-        
-        // Change values dynamically with new input
-        function calculateValue(index) {
-            //console.log("calculateValue called");
-            const ticker = index
-            
-            const sharesInput       = document.getElementById('shares_' + ticker);
-            const priceInput        = document.getElementById('price_' + ticker);
-            const valueDisplay      = document.getElementById('value_' + ticker);
-            const annualDivDisplay  = document.getElementById('annual_div_' + ticker);
-    
-            // Extract values
-            const shares        = parseFloat(sharesInput.value) || 0;
-            const quotePrice    = parseFloat(sharesInput.getAttribute('data-price')) || 0;
-            const latestDiv     = parseFloat(sharesInput.getAttribute('data-latest-div')) || 0;
-            const frequency     = parseFloat(sharesInput.getAttribute('data-frequency')) || 0;
-
-            // Perform necessary calculations
-            const marketValue               = shares * quotePrice;
-            const expectedAnnualDividend    = latestDiv * frequency * shares;
-            
-            // Determine asset type
-            const assetType = (sharesInput || priceInput).closest('[id$="-section"]').id.split('-')[0];
-            
-            // Updates
-            if (isNaN(marketValue) || shares < 0) {
-                valueDisplay.textContent = 'N/A';
-            } else {
-                valueDisplay.textContent = smartFormat(marketValue);
-                valueDisplay.setAttribute('data-market-value', marketValue);
-            }
-            
-            if (annualDivDisplay) {
-                if (isNaN(expectedAnnualDividend) || shares < 0) {
-                    annualDivDisplay.textContent = 'N/A';
-                } else {
-                    annualDivDisplay.textContent = smartFormat(expectedAnnualDividend);
-                }
-            }
-            
-            // Trigger the AJAX update after local calculations
-            updatePortfolioUI(assetType, ticker);
-        }
                 
-        function smartFormat(value) {
-            // Clean the input (in case it's a string with spaces/commas)
-            const cleanValue = String(value).replace(/\s/g, '').replace(',', '.');
-            const val = parseFloat(cleanValue);
-            
-            if (isNaN(val) || val === 0) return "0.00 €";
+        function currencyFormat(value, currencyCode = 'EUR') {
+            const val = typeof value === 'string' 
+                ? parseFloat(value.replace(/\s/g, '').replace(',', '.')) 
+                : value;
 
-            // Small value logic (scientific notation)
+            if (isNaN(val) || val === 0) return `0.00 ${currencyCode === 'EUR' ? '€' : currencyCode}`;
+
+            // Handle tiny values (scientific notation)
             if (Math.abs(val) < 0.01) {
-                return val.toExponential(2) + " €";
+                const symbol = currencyCode === 'EUR' ? '€' : currencyCode;
+                return val.toExponential(2) + " " + symbol;
             }
 
-            // Match Python: Space for thousands, dot for decimal
-            return new Intl.NumberFormat('en-US', {
+            // Use the built-in currency formatter
+            return new Intl.NumberFormat('fr-FR', {
+                style: 'currency',
+                currency: currencyCode,
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2
-            }).format(val).replace(/,/g, ' ') + " €"; 
+            }).format(val).replace(',', '.'); 
         }
         
         function saveCashValue(value) {
@@ -612,120 +581,219 @@
             .catch(error => console.error('Error saving cash:', error));
         }
         
-        function checkStatusChanges() {
-            console.log("checkStatusChanges called");
-            const cells = document.querySelectorAll('.monitor-status');
-            let notifications = JSON.parse(localStorage.getItem('portfolio_alerts') || "[]");
-            let previousState = JSON.parse(localStorage.getItem('portfolio_state') || "{}");
-            let currentState = {};
-            let hasNewAlerts = false;
-            
-            //console.log("cells: ", cells);
-            //console.log("notifications: ", notifications);
-            //console.log("previousState: ", previousState);
+        const NotificationManager = {
+            bellBtn: document.getElementById('bellBtn'),
+            bellBadge: document.getElementById('bell-badge'),
+            list: document.getElementById('notification-list'),
 
-            cells.forEach(cell => {
-                //console.log("cell: ", cell);
-                const ticker = cell.getAttribute('data-ticker');
-                const metric = cell.getAttribute('data-metric');
-                const currentClass = cell.classList.contains('bg-green') ? 'good' : 
-                                     cell.classList.contains('bg-orange') ? 'caution' : 'bad';
+            init() {
+                this.setupListeners();
+                this.render();
+            },
+
+            setupListeners() {
+                this.bellBtn.onclick = (e) => {
+                    e.stopPropagation(); // Prevent clicks from closing the menu immediately
+                    const isVisible = this.list.style.display === 'block';
+                    this.list.style.display = isVisible ? 'none' : 'block';
+                    if (!isVisible) this.markAsRead();
+                };
+
+                // Close on outside click
+                document.addEventListener('click', () => {
+                    this.list.style.display = 'none';
+                });
+            },
+
+            getAlerts() {
+                return JSON.parse(localStorage.getItem('portfolio_alerts') || '[]');
+            },
+
+            saveAlerts(alerts) {
+                localStorage.setItem('portfolio_alerts', JSON.stringify(alerts));
+                this.render();
+            },
+
+            addStatusAlert(ticker, metric, oldStatus, newStatus) {
+                const alerts = this.getAlerts();
+                const message = `<strong>${ticker}</strong>: ${metric}: <span>${oldStatus}</span> -> <span>${newStatus}</span>`;
                 
-                const stateKey = `${ticker}_${metric}`;
-                
-                //console.log("ticker: ", ticker);
-                //console.log("metric: ", metric);
-                //console.log("currentClass: ", currentClass);
-                //console.log("stateKey: ", stateKey);
-                
-                currentState[stateKey] = currentClass;
-                
+                alerts.unshift({
+                    message: message,
+                    status: 'unread',
+                    time: new Date().toLocaleTimeString()
+                });
 
-                // Compare with previous visit
-                if (previousState[stateKey] && previousState[stateKey] !== currentClass) {
-                    notifications.unshift({
-                        ticker: ticker,
-                        metric: metric,
-                        old: previousState[stateKey],
-                        new: currentClass,
-                        time: new Date().toLocaleTimeString(),
-                        status: 'unread'
-                    });
-                    hasNewAlerts = true;
-                }
-            });
+                // Limit to 10 notifications at once
+                this.saveAlerts(alerts.slice(0, 10));
+            },
 
-            // Limit to last 10 notifications
-            if (notifications.length > 10) notifications = notifications.slice(0, 10);
+            add(message) {
+                const alerts = this.getAlerts();
+                alerts.unshift({ message, status: 'unread', time: new Date().toLocaleTimeString() });
+                this.saveAlerts(alerts);
+            },
 
-            localStorage.setItem('portfolio_state', JSON.stringify(currentState));
-            localStorage.setItem('portfolio_alerts', JSON.stringify(notifications));
-            
-            if (hasNewAlerts) {
-                console.log("New alerts is True");
-                renderNotificationBell();
-            }
-            console.log("checkStatusChanges called");
-        }
-        
-        function renderNotificationBell() {
-            const alerts = JSON.parse(localStorage.getItem('portfolio_alerts') || "[]");
-            const list = document.getElementById('notification-list');
-            const badge = document.getElementById('bell-badge');
-            const footer = document.getElementById('notification-footer');
-            
-            // Prevent the "No recent changes" message from stacking
-            const items = list.querySelectorAll('.notification-item, .dropdown-divider, .empty-msg');
-            items.forEach(el => el.remove());
+            markAsRead() {
+                const alerts = this.getAlerts();
+                alerts.forEach(a => a.status = 'read');
+                this.saveAlerts(alerts);
+            },
 
-            // Show badge if there are unread alerts
-            const unreadCount = alerts.filter(a => a.status === 'unread').length;
-            if (unreadCount > 0) {
-                badge.innerText = unreadCount;
-                badge.style.display = 'inline';
-            } else {
-                badge.style.display = 'none';
-            }
-            
-            if (alerts.length > 0) {
-                // Show footer with "Clear" button
-                footer.style.display = 'block';
-        
-                // Map alerts to HTML (excluding the footer area)
-                const itemsHtml = alerts.map(a => `
-                    <li class="notification-item ${a.status === 'unread' ? 'notification-unread' : ''}">
-                        <div class="d-flex justify-content-between">
-                            <strong>${a.ticker}</strong>
-                            <span class="small text-muted">${a.time}</span>
-                        </div>
-                        <div class="mt-1">
-                            <span class="status-indicator status-${a.new}"></span>
-                            ${a.metric}: <b>${a.old}</b> → <b>${a.new}</b>
-                        </div>
+            clearAll() {
+                localStorage.removeItem('portfolio_alerts');
+                this.render();
+            },
+
+            render() {
+                const alerts = this.getAlerts();
+                const unreadCount = alerts.filter(a => a.status === 'unread').length;
+
+                // Update badge
+                this.bellBadge.style.display = unreadCount > 0 ? 'block' : 'none';
+                this.bellBadge.textContent = unreadCount;
+
+                // Update list content
+                const items = alerts.map(a => `
+                    <li style="padding: 10px; border-bottom: 1px solid #eee; background: ${a.status === 'unread' ? '#f0f7ff' : 'white'}">
+                        <small style="color: #888;">${a.time}</small><br>${a.message}
                     </li>
-                `).join('<hr class="dropdown-divider" style="margin:0;">');
+                `).join('');
+
+                this.list.innerHTML = items || '<li style="padding:10px; text-align:center;">No notifications</li>';
                 
-                // Inject before the footer
-                const existingItems = list.querySelectorAll('.notification-item, .dropdown-divider');
-                existingItems.forEach(el => el.remove());
-                list.insertAdjacentHTML('afterbegin', itemsHtml);
-                
-            } else {
-                footer.style.display = 'none';
-                list.insertAdjacentHTML('afterbegin', '<li class="p-3 text-center text-muted empty-msg">No recent changes</li>');
+                // Add "Clear All" button if there are alerts
+                if (alerts.length > 0) {
+                    this.list.innerHTML += `
+                        <div style="padding:10px; text-align:center; border-top:1px solid #ddd;">
+                            <button onclick="NotificationManager.clearAll()">Clear All</button>
+                        </div>`;
+                }
             }
-        }
-        
-        function clearAllNotifications() {
-            localStorage.setItem('portfolio_alerts', JSON.stringify([]));
-            renderNotificationBell();
-        }
+        };
+
+        const TickerManager = {
+            // Cache DOM references
+            btnMain: document.getElementById('add-ticker-btn'),
+            btnCancel: document.getElementById('cancel-ticker-btn'),
+            form: document.getElementById('ticker-form'),
+            selector: document.getElementById('category-selector'),
+            label: document.getElementById('category-label'),
+            input: document.getElementById('ticker'),
+
+            init() {
+                this.setupListeners();
+            },
+
+            setupListeners() {
+                // Toggle category picker
+                if (this.btnMain) {
+                    this.btnMain.onclick = () => this.toggleCategoryPicker();
+                }
+
+                // Cancel button
+                if (this.btnCancel) {
+                    this.btnCancel.onclick = () => this.resetUI();
+                }
+
+                // Category choice buttons
+                document.querySelectorAll('.category-choice').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const cat = e.currentTarget.getAttribute('data-category');
+                        this.showForm(cat);
+                    };
+                });
+
+                // Delete buttons
+                document.addEventListener('click', (e) => {
+                    const deleteBtn = e.target.closest('.delete-btn');
+                    if (deleteBtn) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        this.handleDelete(deleteBtn);
+                    }
+                });
+            },
+
+            // UI logic
+
+            toggleCategoryPicker() {
+                const isSelectorVisible = this.selector.style.display === 'block';
+                const isFormVisible = this.form.style.display === 'block';
+
+                if (isSelectorVisible || isFormVisible) {
+                    this.resetUI();
+                } else {
+                    this.selector.style.display = 'block';
+                    this.form.style.display = 'none';
+                }
+            },
+
+            showForm(category) {
+                this.selector.style.display = 'none';
+                this.form.style.display = 'block';
+                this.form.action = `/add/${category}`;
+                this.label.textContent = category.charAt(0).toUpperCase() + category.slice(1);
+                this.input.focus();
+            },
+
+            resetUI() {
+                this.form.style.display = 'none';
+                this.selector.style.display = 'none';
+                this.form.reset();
+            },
+
+            // Action logic
+            async handleDelete(btn) {
+                const tickerId = btn.getAttribute('data-id');
+                if (!confirm(`Are you sure you want to remove ${tickerId}?`)) return;
+
+                const section = btn.closest('[id$="-section"]');
+                const assetType = section ? section.id.split('-')[0] : 'stocks';
+
+                try {
+                    const response = await fetch(`/delete/${encodeURIComponent(assetType)}/${encodeURIComponent(tickerId)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+
+                    const data = await response.json();
+
+                    if (data.status === 'success') {
+                        const row = document.getElementById(`row-${tickerId}`);
+                        if (row) {
+                            row.classList.add('row-fade-out');
+                            setTimeout(() => {
+                                row.remove();
+                                location.reload(); // Reload to update global totals
+                            }, 400);
+                        }
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                } catch (error) {
+                    console.error('Delete failed:', error);
+                    alert('Could not delete ticker.');
+                }
+            }
+        };
+
         
         // Initial event listener
         document.addEventListener('DOMContentLoaded', () => {
+        
+            console.log("Initial Data loaded:", window.INITIAL_PORTFOLIO_DATA);
+            PortfolioUI.init();
+            NotificationManager.init();
+            TickerManager.init();
+
+            if (window.INITIAL_PORTFOLIO_DATA) {
+                PortfolioUI.update(window.INITIAL_PORTFOLIO_DATA, 'stocks');
+            }
             console.log("Page loaded with cache. Starting background update...");
     
             const assetsData = collectTableData('stocks');
+            console.log("assetsData: ", assetsData);
     
             // Update metrics and price history if needed
             fetch('/update_portfolio_cache', {
@@ -733,68 +801,28 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ assets: assetsData })
             })
-            .then(res => res.json())
-            .then(data => {
-                console.log("Update complete.");
-                
-                updatePortfolioUI('stocks', null, data.portfolio.stocks);
-                updatePortfolioUI('crypto', null, data.portfolio.crypto);
-                
-                const allTotals = {
-                    stocks: data.portfolio.stocks.total_market_value,
-                    crypto: data.portfolio.crypto.total_market_value
-                };
-                
-                createPieCharts(
-                    data.portfolio.stocks.sector_labels, 
-                    data.portfolio.stocks.sector_values,
-                    allTotals
-                );
-                
-                // Update dividend plot
-                if (data.plot_data) {
-                    const plotDiv = document.getElementById('monthly-income-plot');
-                    const newFigure = JSON.parse(data.plot_data);
-                    Plotly.react(plotDiv, newFigure.data, newFigure.layout);
+            .then(res => {
+                if (!res.ok) {
+                    return res.text().then(text => { throw new Error(text) });
                 }
-
-            });
+                return res.json();
+            })
+            .then(data => {
+                console.log("Background sync complete.");
+                
+                PortfolioUI.update(data, 'stocks');
+            })
+            .catch(err => console.error("Cache sync failed:", err));
         
-            // Find all input fields
-            const sharesInputs  = document.querySelectorAll('input[id^="shares_"]');
-            const priceInputs   = document.querySelectorAll('input[id^="price_"]');
-            const envInputs   = document.querySelectorAll('input[id^="env_"]');
-            const socInputs   = document.querySelectorAll('input[id^="soc_"]');
-            const govInputs   = document.querySelectorAll('input[id^="gov_"]');
-            const contInputs   = document.querySelectorAll('input[id^="cont_"]');
+            console.log("Portfolio UI update complete.");
             
-            // Ticker form toggles
-            const addTickerBtn = document.getElementById('add-ticker-btn');
-            const cancelTickerBtn = document.getElementById('cancel-ticker-btn');
-            const tickerForm = document.getElementById('ticker-form');
-            const categoryLabel = document.getElementById('category-label');
-            const categorySelector = document.getElementById('category-selector');
             const freeCashInput = document.getElementById('free-cash-input');
 
-            // Combine all inputs
-            const allInputs = [...sharesInputs, ...priceInputs, ...envInputs, ...socInputs, ...govInputs, ...contInputs];
-    
-            allInputs.forEach(input => {
-                const index = input.id.split('_').pop(); 
-
-                input.addEventListener('keydown', handleEnterKey); // Keydown (Enter) for deliberate saving
-                input.addEventListener('change', () => { // Change for persistent saving when focus is lost/value is finalised.
-                    calculateValue(index); // Update the visual row first
-                    saveSingleValue(input, index, input.value); // Save to database
-                    createPieCharts();
-                });
-            });
-            
             if (freeCashInput) {
                 // Deliberate saving: Save only when finish typing
                 freeCashInput.addEventListener('change', (e) => {
                     saveCashValue(e.target.value); 
-                    createPieCharts();
+                    updatePortfolioUI('stocks');
                 });
                 
                 freeCashInput.addEventListener('keydown', (e) => {
@@ -803,150 +831,6 @@
                     }
                 });
             }
-            
-            if (addTickerBtn) {
-                addTickerBtn.addEventListener('click', function() {
-                    const isCategorySelectorVisible = categorySelector.style.display === 'block';
-                    const isFormVisible = tickerForm.style.display === 'block';
-                    
-                    //console.log("addTickerBtn called");
-                    if (isCategorySelectorVisible || isFormVisible) {
-                        // If visible, hide it
-                        categorySelector.style.display = 'none';
-                        tickerForm.style.display = 'none';
-                    } else {
-                        // If hidden, show it
-                        categorySelector.style.display = 'block';
-                        tickerForm.style.display = 'none';
-                    }
-                });
-            }
-
-            
-            // Add event listeners to category buttons
-            document.querySelectorAll('.category-choice').forEach(button => {
-                button.addEventListener('click', (event) => {
-                    const category = event.currentTarget.getAttribute('data-category');
-
-                    // Update form action URL
-                    tickerForm.action = `/add/${category}`;
-
-                    // Update UI Labels
-                    categoryLabel.textContent = category.charAt(0).toUpperCase() + category.slice(1);
-
-                    // Hide category selector, show the form
-                    categorySelector.style.display = 'none';
-                    tickerForm.style.display = 'block';
-
-                    // Focus on the input field
-                    document.getElementById('ticker').focus();
-                });
-            });
-
-
-            if (cancelTickerBtn) {
-                cancelTickerBtn.addEventListener('click', function() {
-                    //console.log("cancelTickerBtn called");
-                    tickerForm.style.display = 'none';
-                    categorySelector.style.display = 'none';
-                    //addTickerBtn.style.display = 'block';
-                    tickerForm.reset();
-                });
-            }
-
-            // Ticker deletion logic
-            document.querySelectorAll('.delete-btn').forEach(button => {
-                button.addEventListener('click', function(event) {
-                    event.preventDefault(); 
-                    event.stopPropagation();
-    
-                    const btn = event.currentTarget;
-                    const tickerId = btn.getAttribute('data-id'); // This should be the ticker symbol
-                    
-                    //console.log("delete btn clicked");
-                    
-                    if (!confirm(`Are you sure you want to remove ${tickerId}?`)) return;
-
-                    const assetType = btn.closest('[id$="-section"]').id.split('-')[0];
-                    
-                    // Send POST request to flask route
-                    fetch(`/delete/${encodeURIComponent(assetType)}/${encodeURIComponent(tickerId)}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' }
-                    })
-                    .then(response => {
-                        if (!response.ok) throw new Error('Server returned ' + response.status);
-                        return response.json();
-                    })
-                    .then(data => {
-                        if (data.status === 'success') {
-                            const rowToRemove = document.getElementById(`row-${tickerId}`);
-                            if (rowToRemove) {
-                                rowToRemove.classList.add('row-fade-out');
-                                setTimeout(() => {
-                                    rowToRemove.remove();
-                                    // Reload page if you want to update global totals
-                                    location.reload(); 
-                                }, 400);
-                            }
-                        } else {
-                            alert('Error deleting ticker: ' + data.message);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Fetch Error:', error);
-                        alert('Could not delete ticker.');
-                    });
-                });
-            });
-            
-            const bellBtn = document.getElementById('bellBtn');
-            const notificationList = document.getElementById('notification-list');
-            
-            if (bellBtn) {
-                bellBtn.addEventListener('click', (e) => {
-                    e.stopPropagation(); // Prevent clicks from closing the menu immediately
-                    
-                    // Toggle visibility
-                    const isVisible = notificationList.style.display === 'block';
-                    notificationList.style.display = isVisible ? 'none' : 'block';
-
-                    if (!isVisible) {
-                        // If we just opened it, render the latest alerts
-                        renderNotificationBell();
-
-                        // After 3 seconds of being open, mark all as read
-                        setTimeout(() => {
-                            let alerts = JSON.parse(localStorage.getItem('portfolio_alerts') || "[]");
-                            let changed = false;
-                            alerts.forEach(a => {
-                                if (a.status === 'unread') {
-                                    a.status = 'read';
-                                    changed = true;
-                                }
-                            });
-                            if (changed) {
-                                localStorage.setItem('portfolio_alerts', JSON.stringify(alerts));
-                                renderNotificationBell(); // Refresh to remove the blue backgrounds
-                            }
-                        }, 3000);
-                    }
-                });
-            }
-            
-            // Close the dropdown if the user clicks anywhere else on the page
-            document.addEventListener('click', () => {
-                if (notificationList) notificationList.style.display = 'none';
-            });
-            
-            checkStatusChanges();
-            
-            // Initial load: Use the data provided by Flask/Jinja
-            const initialLabels = {{ portfolio.stocks.sectors.labels | tojson }};
-            const initialValues = {{ portfolio.stocks.sectors.values | tojson }};
-    
-            //console.log("Initial createPieCharts called");
-            createPieCharts(initialLabels, initialValues);
         });
     </script>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>

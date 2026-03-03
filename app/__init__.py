@@ -21,10 +21,4 @@ def create_app():
     from .routes.cashflow import datetime_format
     app.jinja_env.filters['strftime'] = datetime_format
     
-    from .routes.portfolio import format_weight
-    app.jinja_env.filters['smart_weight'] = format_weight
-    
-    from .routes.portfolio import format_price
-    app.jinja_env.filters['smart_price'] = format_price
-    
     return app

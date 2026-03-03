@@ -8,17 +8,16 @@ bp = Blueprint('portfolio', __name__)
 
 @bp.route('/portfolio', methods=['GET', 'POST'])
 @bp.route('/', methods=['GET', 'POST'])   
-def portfolio_feature(): 
-    #print("portfolio_feature called")
+def portfolio_feature():
     
     data = get_full_portfolio_data()
+    #print("Weight: ", data['portfolio'].stocks.assets[0].weight)
     
-    #print("portfolio_feature out")
-
     return render_template(
         'portfolio.html',
         title='Portfolio Dashboard',
-        **data
+        portfolio=data['portfolio'],
+        income_plot=data['income_plot'].to_html(full_html=False, include_plotlyjs='cdn')
     )
     
 def get_full_portfolio_data():
@@ -37,6 +36,7 @@ def get_full_portfolio_data():
             Asset(
                 ticker=t,
                 metrics=next(m for m in raw_metrics if m['Ticker']==t),
+                asset_type=asset_type,
                 shares=data['shares'].get(t, 0),
                 avg_price=data['avg_price'].get(t, 0),
                 env=data['env'].get(t, 0),
@@ -53,7 +53,7 @@ def get_full_portfolio_data():
 
     return {
         'portfolio': portfolio,
-        'income_plot': income_plot.to_html(full_html=False, include_plotlyjs='cdn')
+        'income_plot': income_plot
     }
 
 def get_assets(asset_class='stocks'):
@@ -94,19 +94,12 @@ def update_portfolio_cache():
         metrics = finance_data.fetch_latest_metrics(  tickers, asset_type,
                                             interval='4h', force_update=True)
                                             
-    updated_data = get_full_portfolio_data()
+    data = get_full_portfolio_data()
         
-    # Update dividend plot
-    if asset_type == 'stocks':
-        data = request.get_json()
-        asset_items = data.get('assets', [])
-        current_shares  = {item['ticker']: float(item['shares']) for item in asset_items}
-        fig = plotting_utils.create_monthly_dividends_figure(metrics, current_shares)
-        updated_data['plot_data'] = fig.to_json()
-    
-    updated_data['portfolio'] = updated_data['portfolio'].to_dict()
-        
-    return jsonify(updated_data)
+    return jsonify({
+        'portfolio': data['portfolio'].to_dict(),
+        'income_plot': data['income_plot'].to_json()
+    })
      
 @bp.route('/update_portfolio_data/<asset_type>', methods=['POST'])
 def update_portfolio_data(asset_type):
@@ -119,48 +112,25 @@ def update_portfolio_data(asset_type):
     data = request.get_json()
     
     ticker_list = get_assets(asset_type)
+    # Update metrics if necessary
     metrics = finance_data.fetch_latest_metrics(ticker_list, asset_type,
                                                 interval='4h', force_update=True)
-    asset_items = data.get('assets', [])
     
-    # Reconstruct dynamic data from AJAX
-    current_shares  = {item['ticker']: float(item['shares']) for item in asset_items}
-    current_prices  = {item['ticker']: float(item['price']) for item in asset_items}
-#    current_env     = {item['ticker']: float(item['env']) for item in asset_items}
-#    current_soc     = {item['ticker']: float(item['soc']) for item in asset_items}
-#    current_gov     = {item['ticker']: float(item['gov']) for item in asset_items}
-#    current_cont    = {item['ticker']: float(item['cont']) for item in asset_items}
-    
-    #print("results['total_market_value']: ", results['total_market_value'])
-    
-    results = calculate_portfolio_metrics(metrics, current_shares, current_prices)
-    
-    #print("results['total_market_value']: ", results['total_market_value'])
-    
-    response = {
-        'total_market_value': results['total_market_value'],
-        'total_cost_basis': results['total_cost_basis'],
-        'sector_labels': results['sector_labels'],
-        'sector_values': results['sector_values'],
-        'portfolio_yield': results['portfolio_yield'],
-        'portfolio_div_growth': results['portfolio_div_growth'],
-        'annual_dividends' : results['annual_dividends']
-    }
-    
-    if asset_type == 'stocks':
-        fig = plotting_utils.create_monthly_dividends_figure(metrics, current_shares)
-        response['plot_data'] = fig.to_json()
-        response['monthly_payment_counts'] = results['monthly_payment_counts']
+    data = get_full_portfolio_data()
+    #print("Weight: ", data['portfolio'].stocks.assets[0].weight)
     
     print("update_portfolio_data out")
     
-    return jsonify(response)
+    return jsonify({
+        'portfolio': data['portfolio'].to_dict(),
+        'income_plot': data['income_plot'].to_json()
+    })
           
 
 @bp.route('/save_single_value/<asset_type>', methods=['POST'])
 def save_single_value(asset_type):
     """
-    Handles saving a single updated share count or price from an AJAX request.
+    Handles saving feature update from an AJAX request.
     """
     print(f"save_single_value called for asset type {asset_type}")
     data = request.get_json()
@@ -171,55 +141,26 @@ def save_single_value(asset_type):
     
     if not all([ticker, field, isinstance(value, (int, float))]):
         return jsonify({'status': 'error', 'message': 'Invalid data received.'}), 400
-
-    # Update shares count
-    if field == 'shares':
-        # Load all shares, update only the one that changed
-        current_shares = storage_utils.load_shares(asset_type)
-        current_shares[ticker] = max(0.0, value)
-        storage_utils.save_shares(current_shares, asset_type)
-        session['share_counts'] = current_shares
         
-    # Update average buy price
-    elif field == 'price':
-        # Load all prices, update only the one that changed
-        current_prices = storage_utils.load_prices(asset_type)
-        current_prices[ticker] = max(0.0, value)
-        storage_utils.save_prices(current_prices, asset_type)
-        session['avg_buy_prices'] = current_prices
-        
-    # Update environment score
-    elif field == 'env':
-        current_env = storage_utils.load_env(asset_type)
-        current_env[ticker] = max(0.0, value)
-        storage_utils.save_env(current_env, asset_type)
-        session['env'] = current_env
-        
-    # Update social score
-    elif field == 'soc':
-        current_soc = storage_utils.load_soc(asset_type)
-        current_soc[ticker] = max(0.0, value)
-        storage_utils.save_soc(current_soc, asset_type)
-        session['soc'] = current_soc
-        
-    # Update governance score
-    elif field == 'gov':
-        current_gov = storage_utils.load_gov(asset_type)
-        current_gov[ticker] = max(0.0, value)
-        storage_utils.save_gov(current_gov, asset_type)
-        session['gov'] = current_gov
-        
-    # Update controversy score
-    elif field == 'cont':
-        current_cont = storage_utils.load_cont(asset_type)
-        current_cont[ticker] = max(0.0, value)
-        storage_utils.save_cont(current_cont, asset_type)
-        session['cont'] = current_cont
-
-    else:
-        print("save_single_value out")
+    loaders = {
+        'shares': storage_utils.load_shares, 'price': storage_utils.load_prices,
+        'env': storage_utils.load_env, 'soc': storage_utils.load_soc,
+        'gov': storage_utils.load_gov, 'cont': storage_utils.load_cont
+    }
+    savers = {
+        'shares': storage_utils.save_shares, 'price': storage_utils.save_prices,
+        'env': storage_utils.save_env, 'soc': storage_utils.save_soc,
+        'gov': storage_utils.save_gov, 'cont': storage_utils.save_cont
+    }
+    
+    if field not in loaders:
         return jsonify({'status': 'error', 'message': f'Unknown field: {field}'}), 400
 
+    current_data = loaders[field](asset_type)
+    current_data[ticker] = max(0.0, value)
+    savers[field](current_data, asset_type)
+    session[field] = current_data
+    
     print("save_single_value out")
     return jsonify({'status': 'success', 'message': f'Updated {field} for {ticker}.'})
   
@@ -296,42 +237,14 @@ def delete_asset(asset_class, ticker):
         return jsonify({'status': 'success', 'message': f'{ticker} removed.'})
     
     return jsonify({'status': 'error', 'message': 'Ticker not found.'}), 404
-
-def format_price(value):
-    #print("format_price called")
+    
+# Needed for returning correctly formatted numbers at initialisation
+@bp.app_template_filter('format_finance')
+def format_finance(val):
     try:
-        val = float(value)
-    except (ValueError, TypeError):
+        val = float(val)
+        if val == 0: return "0.00"
+        if 0 < abs(val) < 0.01: return f"{val:.2e}"
+        return f"{val:,.2f}".replace(",", " ")
+    except:
         return "N/A"
-
-    if val == 0:
-        return "0.00"
-    
-    # If the price is less than 0.01, use scientific notation
-    # TODO check that, there seems to be a few bugs in the asset chart pie and crypto table
-    if 0 < abs(val) < 0.01:
-        # Returns format like 1.20e-7
-        return f"{val:.2e}"
-    
-    #print("format_price out")
-    # Otherwise, standard 2 decimal places
-    return f"{val:,.2f}".replace(",", " ")
-
-def format_weight(value):
-    try:
-        val = float(value)
-    except (ValueError, TypeError):
-        return "0.00"
-
-    if val == 0:
-        return "0.00"
-    
-    # If the weight is less than 0.01%, use scientific notation
-    if 0 < abs(val) < 0.01:
-        return "{:.2e}".format(val)
-    
-    # Standard 2 decimal places for significant weights
-    return "{:.2f}".format(val)
-
-
-

@@ -1,23 +1,33 @@
 from types import SimpleNamespace
 from app.utils import storage_utils
-
+    
 # Define a single asset (one per ticker)
 class Asset:
-    def __init__(self, ticker, metrics, shares=0.0, avg_price=0.0, env=0, soc=0, gov=0, cont=0):
+    def __init__(self, ticker, metrics, asset_type='stocks', shares=0.0, avg_price=0.0, env=0, soc=0, gov=0, cont=0):
         self.ticker = ticker
+        self.asset_type = asset_type
         self.metrics = metrics
         self.shares = float(shares)
         self.avg_price = float(avg_price)
         self.sector = metrics.get("Sector", "Null")
+        self.quote = self._safe_float(metrics.get("Quote"))
         self.quote_eur = self._safe_float(metrics.get("Quote_EUR"))
         self.latest_div = self._safe_float(metrics.get("Latest_Div_EUR"))
         self.months_paid = metrics.get("Months_Paid", [0]*12)
-        self.div_yield = self._safe_float(metrics.get("Div_Yield"))
-        self.div_growth = self._safe_float(metrics.get("Div_CAGR"))
+        self.div_yield = self._safe_float(metrics.get("Div_Yield")*100)
+        self.div_growth = self._safe_float(metrics.get("Div_CAGR")*100)
+        self.pe_ratio = self._safe_float(metrics.get("P/E", 0))
+        self.fwd_pe = self._safe_float(metrics.get("Fwd_P/E", 0))
+        self.peg = self._safe_float(metrics.get("PEG", 0))
+        self.pb_ratio = self._safe_float(metrics.get('P/B',0))
+        self.bench_pb = self._safe_float(metrics.get('Sector_PB_Benchmark',0))
+        self.earnings_gr = self._safe_float(metrics.get('Earnings_Growth',0)*100)
+        self.payout_ratio = self._safe_float(metrics.get('PayoutRatio',0)*100)
         self.env = int(env)
         self.soc = int(soc)
         self.gov = int(gov)
         self.cont = int(cont)
+        self.weight = 0.0
         
     # Ensure floats are retrieved from data
     def _safe_float(self, val):
@@ -42,29 +52,115 @@ class Asset:
         if not hasattr(self, 'months_paid'): return [0.0] * 12
             
         return [self.latest_div * self.shares if m == 1 else 0.0 for m in self.months_paid]
-        
+    
+    @property
+    def annual_dividend(self):
+        payment_frequency = sum(self.months_paid)
+        total = self.latest_div * payment_frequency * self.shares
+        return total
+    
+    # Determine background colour. TODO: give user choice instead of hard coding
+    def get_metric_config(self, metric_name):
+        # Conditional rule
+        if self.asset_type == 'crypto':
+            weight_rules = {'low': 40, 'high': 50, 'dir': 'low_is_better'}
+        else:
+            weight_rules = {'low': 4, 'high': 5, 'dir': 'low_is_better'}
+
+        # Fixed rules
+        rules = {
+            'pe_ratio': {'val': self.pe_ratio, 'low': 10,  'high': 20, 'dir': 'low_is_better'},
+            'fwd_pe': {'val': self.fwd_pe,   'low': 10,  'high': 20, 'dir': 'low_is_better'},
+            'earnings_gr': {'val': self.earnings_gr,   'low': 0,  'high': 0, 'dir': 'high_is_better'},
+            'peg': {'val': self.peg,   'low': 0.9,  'high': 1, 'dir': 'low_is_better'},
+            'div_yield': {'val': self.div_yield, 'low': 2, 'high': 4, 'dir': 'high_is_better'},
+            'div_growth': {'val': self.div_growth, 'low': 4, 'high': 8, 'dir': 'high_is_better'},
+            'payout_ratio': {'val': self.payout_ratio, 'low': 90, 'high': 100, 'dir': 'low_is_better'},
+            'env': {'val': self.env,      'low': 4,   'high': 6,  'dir': 'high_is_better'},
+            'soc': {'val': self.soc,      'low': 4,   'high': 6,  'dir': 'high_is_better'},
+            'gov': {'val': self.gov,      'low': 4,   'high': 6,  'dir': 'high_is_better'},
+            'cont': {'val': self.cont,     'low': 4,   'high': 6,  'dir': 'high_is_better'},
+            'pb_ratio': {'val': self.pb_ratio, 'low': self.bench_pb, 'high': self.bench_pb, 'dir': 'low_is_better'},
+            'weight': {'val': self.weight, **weight_rules}
+        }
+
+        config = rules.get(metric_name.lower())
+        if not config:
+            return {'val': 0, 'class': ''}
+
+        return {
+            'val': config['val'],
+            'class': calculate_color(config['val'], config['low'], config['high'], config['dir'])
+        }
+    
+    # Define schema for the HTML renderer
+    def get_schema(self):
+        # Common columns
+        schema = [
+            {'id': 'ticker',    'label': 'Ticker',      'type': 'ticker'},
+            {'id': 'shares',    'label': 'Shares',      'type': 'input'},
+            {'id': 'avg_price', 'label': 'Avg Price',   'type': 'input'},
+            {'id': 'market_value', 'label': 'Value (€)', 'type': 'finance', 'suffix': ' €'},
+            {'id': 'quote',     'label': 'Quote',       'type': 'finance'},
+            {'id': 'quote_eur', 'label': 'Quote (€)',   'type': 'finance', 'suffix': ' €'},
+            {'id': 'weight',    'label': 'Weight',      'type': 'monitor', 'suffix': '%'},
+        ]
+
+        # Category-specific columns
+        if self.asset_type == 'stocks':
+            schema += [
+                {'id': 'pe_ratio',    'label': 'P/E',         'type': 'monitor'},
+                {'id': 'fwd_pe',      'label': 'Fwd P/E',     'type': 'monitor'},
+                {'id': 'pb_ratio',    'label': 'P/B',         'type': 'monitor'},
+                {'id': 'peg',         'label': 'PEG',         'type': 'monitor'},
+                {'id': 'earnings_gr', 'label': 'Earnings gr', 'type': 'monitor', 'suffix': '%'},
+                {'id': 'div_yield',   'label': 'Div. yield',  'type': 'monitor', 'suffix': '%'},
+                {'id': 'div_growth',  'label': 'Div. CAGR',   'type': 'monitor', 'suffix': '%'},
+                {'id': 'payout_ratio','label': 'Payout ratio','type': 'monitor', 'suffix': '%'},
+                {'id': 'env',         'label': 'E',           'type': 'monitor_input'},
+                {'id': 'soc',         'label': 'S',           'type': 'monitor_input'},
+                {'id': 'gov',         'label': 'G',           'type': 'monitor_input'},
+                {'id': 'cont',        'label': 'Cont',        'type': 'monitor_input'},
+                {'id': 'latest_div',  'label': 'Latest div.', 'type': 'finance', 'suffix': ' €'},
+                {'id': 'months_paid', 'label': 'Months paid', 'type': 'visualizer'},
+                {'id': 'annual_dividend','label': 'Annual div','type': 'finance', 'suffix': ' €'},
+                {'id': 'currency',    'label': 'Curr',        'type': 'text'},
+                {'id': 'sector',      'label': 'Sector',      'type': 'text'},
+            ]
+        else:
+            schema += [
+                {'id': 'staking_yield', 'label': 'Staking yield', 'type': 'input', 'placeholder': '0.05'}
+            ]
+        return schema
+    
     # Convert to a dictionary for the frontend
     def to_dict(self):
-        return {
-            'ticker': self.ticker,
-            'metrics': self.metrics,
-            'shares': self.shares,
-            'avg_price': self.avg_price,
-            'sector': self.sector,
-            'quote_eur': self.quote_eur,
-            'latest_div': self.latest_div,
-            'months_paid': self.months_paid,
-            'div_yield': self.div_yield,
-            'div_growth': self.div_growth,
-            'env': self.env,
-            'soc': self.soc,
-            'gov': self.gov,
-            'cont': self.cont,
+        # Basic attributes
+        data = {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+        # Properties
+        data.update({
             'market_value': self.market_value,
             'cost_basis': self.cost_basis,
-            'asset_income': self.asset_income
-        }
-        
+            'annual_dividend': self.annual_dividend,
+            'asset_income': self.asset_income,
+            'status_colors': {
+                'weight': self.get_metric_config('weight')['class'],
+                'pe_ratio': self.get_metric_config('pe_ratio')['class'],
+                'fwd_pe': self.get_metric_config('fwd_pe')['class'],
+                'earnings_gr': self.get_metric_config('earnings_gr')['class'],
+                'peg': self.get_metric_config('peg')['class'],
+                'pb_ratio': self.get_metric_config('pb_ratio')['class'],
+                'div_yield': self.get_metric_config('div_yield')['class'],
+                'div_growth': self.get_metric_config('div_growth')['class'],
+                'payout_ratio': self.get_metric_config('payout_ratio')['class'],
+                'weight': self.get_metric_config('weight')['class'],
+                'env': self.get_metric_config('env')['class'],
+                'soc': self.get_metric_config('soc')['class'],
+                'gov': self.get_metric_config('gov')['class'],
+                'cont': self.get_metric_config('cont')['class']
+            }
+        })
+        return data
         
     def __repr__(self):
         return f"Asset({self.ticker}, MarketValue={self.market_value:.2f})"
@@ -73,7 +169,8 @@ class Asset:
 class Portfolio:
     def __init__(self, assets):
         self.assets = assets
-        
+        self.update_weights()
+
     @property
     def total_market_value(self):
         return sum(asset.market_value for asset in self.assets)
@@ -129,8 +226,8 @@ class Portfolio:
         )
 
         return SimpleNamespace(
-            div_yield = total_income / total_mv,
-            div_growth= total_income_growth / total_income
+            div_yield = (total_income / total_mv),
+            div_growth = (total_income_growth / total_income)
         )
         
     @property
@@ -145,6 +242,69 @@ class Portfolio:
             values = list(sectors.values())
         )
 
+    def update_weights(self):
+        total_mv = self.total_market_value
+        if self.total_market_value > 0:
+            for asset in self.assets:
+                asset.weight = (asset.market_value / total_mv) * 100
+        else:
+            for asset in self.assets:
+                asset.weight = 0
+
+    # Define schema for the HTML renderer
+    def get_footer(self, asset_type):
+        if not self.assets:
+            return []
+
+        # Get the column structure from the first asset
+        asset_schema = self.assets[0].get_schema()
+        
+        # Define which IDs in the schema should have footer values
+        if asset_type == 'stocks':
+            footer_map = {
+                'ticker':       {'label': 'Total Stocks', 'class': 'font-bold'},
+                'avg_price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-stocks', 'type': 'finance'},
+                'market_value': {'val': self.total_market_value, 'id': 'total-market-value-stocks', 'type': 'finance'},
+                'div_yield':    {'val': self.portfolio_yield_data.div_yield * 100, 'id': 'portfolio-yield-display', 'type': 'finance', 'suffix': '%'},
+                'div_growth':   {'val': self.portfolio_yield_data.div_growth * 100, 'id': 'portfolio-div-growth-display', 'type': 'finance', 'suffix': '%'},
+                'months_paid':  {'type': 'visualizer'},
+                'annual_dividend': {'val': self.annual_dividends, 'id': 'annual-dividends', 'type': 'finance', 'suffix': ' €'},
+            }
+        else:
+            footer_map = {
+                'ticker':       {'label': 'Total Crypto', 'class': 'font-bold'},
+                'avg_price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-crypto', 'type': 'finance'},
+                'market_value': {'val': self.total_market_value, 'id': 'total-market-value-crypto', 'type': 'finance'},
+                'staking_yield':{'label': "Avg: N/A%", 'type': 'text'},
+            }
+
+        resolved_footer = []
+        current_gap = 0
+
+        # Iterate through the Asset schema and find matches
+        for col in asset_schema:
+            if col['id'] in footer_map:
+                # If there's a gap, add a spacer cell
+                if current_gap > 0:
+                    resolved_footer.append({'type': 'spacer', 'colspan': current_gap})
+                
+                # Add the data
+                cell_data = footer_map[col['id']]
+                cell_data['colspan'] = 1
+                resolved_footer.append(cell_data)
+                
+                # Reset gap
+                current_gap = 0
+            else:
+                # No footer value for this column, increment gap
+                current_gap += 1
+
+        # Add trailing spacer if needed
+        if current_gap > 0:
+            resolved_footer.append({'type': 'spacer', 'colspan': current_gap})
+
+        return resolved_footer
+        
     def to_dict(self):
         return {
             'assets': [a.to_dict() for a in self.assets],
@@ -262,7 +422,20 @@ class PortfolioManager:
         return "\n".join(lines)
 
 
-
+# Generic background colour function
+def calculate_color(value, low, high, direction='high_is_better'):
+    """Python implementation of your Jinja color logic."""
+    if not isinstance(value, (int, float)) or value <= 0:
+        return "bg-red"
+    
+    if direction == 'high_is_better':
+        if value < low: return "bg-red"
+        if value <= high: return "bg-orange"
+        return "bg-green"
+    else: # low_is_better
+        if value > high: return "bg-red"
+        if value >= low: return "bg-orange"
+        return "bg-green"
 
 
 

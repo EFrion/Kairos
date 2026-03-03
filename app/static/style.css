@@ -73,6 +73,13 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     border-left: none;
 }
 
+.ticker-div{
+    display: flex; 
+    align-items: center; 
+    justify-content: space-between; 
+    font-weight: bold;
+}
+
 /* Style for the total row */
 .total-row {
     border-top: 2px solid #dee2e6;
@@ -86,6 +93,8 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     color: white;             /* Force white text */
     /* Reset specific padding for visualizer cell contents */
     padding: 8px;
+    text-align: center;
+    font-weight: bold;
 }
 
 .total-row td.month-visualizer-cell {
@@ -137,8 +146,27 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 
 /* Inputs */
 input {
-    background: transparent; border: 1px solid rgba(255,255,255,0.2); border-radius: 5px; font-weight: bold; width: 160px; text-align: center; outline: none; transition: all 0.3s;"
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 5px;
+    font-weight: bold;
+    text-align: center;
+    outline: none;
+    transition: all 0.3s;
+    max-width: 20ch;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
+
+[id^="avg_price"] {
+    width: 15ch;
+}
+
+input[id^="env"], input[id^="soc"], input[id^="gov"], input[id^="cont"] {
+    width: 2ch;
+}
+
 
 input:hover {
     background: rgba(255,255,255,0.15) !important;
@@ -160,6 +188,8 @@ input[type=number]::-webkit-outer-spin-button {
 
 input[type=number]{
     -moz-appearance: textfield;
+    -webkit-appearance: none;
+    appearance: textfield;
 }
 
 /* Container for each notification */
@@ -241,6 +271,15 @@ input[type=number]{
 .table-container tbody tr:hover .bg-orange { background-color: #fff3cd !important; }
 .table-container tbody tr:hover .bg-green { background-color: #d4edda !important; }
 
+.delete-btn {
+    margin-left: 10px;
+    cursor: pointer; 
+    border: none; 
+    background: none; 
+    font-size: 14px; 
+    padding: 0 5px;
+}
+
 /* */
 .table-container {
     width: 100%;           /* Take up the full width of the parent */
@@ -260,6 +299,7 @@ input[type=number]{
 .table-container::-webkit-scrollbar-thumb:hover {
     background: #555;
 }
+
 
 /* Make the first header sticky */
 thead th:first-child {
