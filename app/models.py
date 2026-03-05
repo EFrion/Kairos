@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from app.utils import storage_utils
+import pandas as pd
 
 @dataclass
 class AssetData:
@@ -9,7 +10,7 @@ class AssetData:
     metrics: Dict[str, Any]
     asset_type: str = 'stocks'
     shares: float = 0.0
-    avg_price: float = 0.0
+    price: float = 0.0
     env: int = 0
     soc: int = 0
     gov: int = 0
@@ -85,7 +86,7 @@ class Asset(AssetData):
         
     @property
     def cost_basis(self):
-        return self.shares * self.avg_price
+        return self.shares * self.price
         
     @property
     def asset_income(self):
@@ -132,7 +133,7 @@ class Asset(AssetData):
         schema = [
             {'id': 'ticker',    'label': 'Ticker',      'type': 'ticker'},
             {'id': 'shares',    'label': 'Shares',      'type': 'input'},
-            {'id': 'avg_price', 'label': 'Avg Price',   'type': 'input'},
+            {'id': 'price', 'label': 'Avg Price',   'type': 'input'},
             {'id': 'market_value', 'label': 'Value (€)', 'type': 'finance', 'suffix': ' €'},
             {'id': 'quote',     'label': 'Quote',       'type': 'finance'},
             {'id': 'quote_eur', 'label': 'Quote (€)',   'type': 'finance', 'suffix': ' €'},
@@ -179,7 +180,8 @@ class Asset(AssetData):
             'status_colors': {
                 m: self.get_metric_config(m)['class']
                 for m in self.METRIC_COLOUR_RULES.get(self.asset_type, {}).keys()
-            }
+            },
+            'schema': self.get_schema()
         })
         return data
         
@@ -284,17 +286,17 @@ class Portfolio:
         if asset_type == 'stocks':
             footer_map = {
                 'ticker':       {'label': 'Total Stocks', 'class': 'font-bold'},
-                'avg_price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-stocks', 'type': 'finance'},
+                'price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-stocks', 'type': 'finance'},
                 'market_value': {'val': self.total_market_value, 'id': 'total-market-value-stocks', 'type': 'finance'},
-                'div_yield':    {'val': self.portfolio_yield_data.div_yield * 100, 'id': 'portfolio-yield-display', 'type': 'finance', 'suffix': '%'},
-                'div_growth':   {'val': self.portfolio_yield_data.div_growth * 100, 'id': 'portfolio-div-growth-display', 'type': 'finance', 'suffix': '%'},
+                'div_yield':    {'val': self.portfolio_yield_data.div_yield, 'id': 'portfolio-div-yield', 'type': 'finance', 'suffix': '%'},
+                'div_growth':   {'val': self.portfolio_yield_data.div_growth, 'id': 'portfolio-div-growth', 'type': 'finance', 'suffix': '%'},
                 'months_paid':  {'type': 'visualizer'},
                 'annual_dividend': {'val': self.annual_dividends, 'id': 'annual-dividends', 'type': 'finance', 'suffix': ' €'},
             }
         else:
             footer_map = {
                 'ticker':       {'label': 'Total Crypto', 'class': 'font-bold'},
-                'avg_price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-crypto', 'type': 'finance'},
+                'price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-crypto', 'type': 'finance'},
                 'market_value': {'val': self.total_market_value, 'id': 'total-market-value-crypto', 'type': 'finance'},
                 'staking_yield':{'label': "Avg: N/A%", 'type': 'text'},
             }
@@ -326,7 +328,8 @@ class Portfolio:
 
         return resolved_footer
         
-    def to_dict(self):
+    def to_dict(self, asset_type):
+        # Define footer_data to update metrics in JS
         return {
             'assets': [a.to_dict() for a in self.assets],
             'total_market_value': self.total_market_value,
@@ -334,7 +337,8 @@ class Portfolio:
             'monthly_income_data': vars(self.monthly_income_data), # vars is used to extract dicts from object instance
             'annual_dividends': self.annual_dividends,
             'portfolio_yield_data': vars(self.portfolio_yield_data),
-            'sectors': vars(self.sectors)
+            'sectors': vars(self.sectors),
+            'footer': self.get_footer(asset_type)
         }
 
     def __repr__(self):
@@ -346,7 +350,7 @@ class PortfolioLoader:
     def load_asset_data(asset_type):
         return {
             'shares': storage_utils.load_shares(asset_type),
-            'avg_price': storage_utils.load_prices(asset_type),
+            'price': storage_utils.load_prices(asset_type),
             'env': storage_utils.load_env(asset_type),
             'soc': storage_utils.load_soc(asset_type),
             'gov': storage_utils.load_gov(asset_type),
@@ -410,7 +414,7 @@ class PortfolioManager:
         return self._portfolios.items()
         
     def to_dict(self):
-        data = {name: p.to_dict() for name, p in self.items()}
+        data = {name: p.to_dict(asset_type=name) for name, p in self.items()}
         data['summary'] = {
             'total_market_value': self.total_market_value,
             'grand_total_cost_basis': self.grand_total_cost_basis,
@@ -441,6 +445,47 @@ class PortfolioManager:
         lines.append("="*count + "\n")
         
         return "\n".join(lines)
+
+class PortfolioAnalyser:
+    def __init__(self, portfolio: Portfolio, price_history: pd.DataFrame):
+        self.portfolio = portfolio
+        self.tickers = [a.ticker for a in portfolio.assets]
+        
+        # Filter price history to only include tickers in our actual portfolio
+        self.data = price_history[self.tickers].dropna()
+        self.returns = self.data.pct_change().dropna()
+        
+        # Annualization factor: 252 for daily data
+        self.ann_factor = 252 
+
+    def get_current_weights(self):
+        """Extracts weights directly from the Asset objects."""
+        return np.array([a.weight / 100 for a in self.portfolio.assets])
+
+    def calculate_stats(self, weights=None):
+        """Calculates Return, Volatility, and Sharpe Ratio."""
+        if weights is None:
+            weights = self.get_current_weights()
+            
+        mean_returns = self.returns.mean() * self.ann_factor
+        cov_matrix = self.returns.cov() * self.ann_factor
+        
+        port_return = np.sum(mean_returns * weights)
+        port_vol = np.sqrt(weights.T @ cov_matrix @ weights)
+        sharpe = port_return / port_vol if port_vol != 0 else 0
+        
+        return port_return, port_vol, sharpe
+
+    def get_efficient_frontier(self, num_portfolios=100):
+        """Calculates the frontier points."""
+        # Logic from your original test.py, now encapsulated
+        # ... (Optimization loops here) ...
+        return frontier_data
+
+    def get_correlation_matrix(self):
+        """Returns the data for your heatmap."""
+        return self.returns.corr()
+
 
 
 # Generic background colour function

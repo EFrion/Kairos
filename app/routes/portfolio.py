@@ -38,7 +38,7 @@ def get_full_portfolio_data():
                 metrics=next(m for m in raw_metrics if m['Ticker']==t),
                 asset_type=asset_type,
                 shares=data['shares'].get(t, 0),
-                avg_price=data['avg_price'].get(t, 0),
+                price=data['price'].get(t, 0),
                 env=data['env'].get(t, 0),
                 soc=data['soc'].get(t, 0),
                 gov=data['gov'].get(t, 0),

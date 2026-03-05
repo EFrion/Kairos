@@ -284,52 +284,91 @@
                 // Update the grand total
                 this.setText('grand-total-display', currencyFormat(summary.grand_total_with_cash));
 
-                // Update table category totals
-                this.setText(`total-market-value-${assetType}`, currencyFormat(subPortfolio.total_market_value));
-                this.setText(`total-cost-basis-${assetType}`, currencyFormat(subPortfolio.total_cost_basis));
+                if (subPortfolio.footer) {
+                    subPortfolio.footer.forEach(cell => {
+                        // Only update if the cell has an ID and a value
+                        if (cell.id && cell.val !== undefined) {
+                            let displayVal = cell.val;
+                            
+                            // Format based on type
+                            if (cell.type === 'finance') {
+                                // Use currency format or percentage based on suffix
+                                displayVal = cell.suffix === '%' 
+                                    ? cell.val.toFixed(2) + '%' 
+                                    : currencyFormat(cell.val);
+                            }
+                            
+                            this.setText(cell.id, displayVal);
+                        }
+                    });
+                }
 
-                // Updata stocks metrics
-                if (assetType === 'stocks') {
-                    this.updateStockMetrics(subPortfolio, ticker);
+                // Update the bodies
+                this.syncMetrics(subPortfolio);
+
+                if (assetType === 'stocks' && subPortfolio.monthly_income_data) {
+                    const dataRow = document.getElementById('total-month-data-row');
+                    if (dataRow) {
+                        dataRow.innerHTML = subPortfolio.monthly_income_data.counts.map(count => `
+                            <span class="month-data-item ${count > 0 ? 'paid' : ''}">${count}</span>
+                        `).join('');
+                    }
                 }
 
                 // Update all charts
                 this.updateCharts(data, subPortfolio, assetType);
 
-                // Update weights
-                this.updateWeights(subPortfolio);
-
                 // Post-update logic
                 this.monitorStatusChanges();
             },
 
-            updateWeights(subPortfolio) {
+
+            syncMetrics(subPortfolio) {
                 subPortfolio.assets.forEach(asset => {
-                    const cellId = `weight_${asset.ticker}`;
-                    this.setMetricWithColor(cellId, asset.weight, [4, 5], 'low_is_better', '%');
+                    // Loop through the schema defined in Python
+                    asset.schema.forEach(column => {
+                        const metric = column.id;
+                        const selector = `[id="${metric}_${asset.ticker}"], [name="${metric}_${asset.ticker}"]`;
+                        const elements = document.querySelectorAll(selector);
+
+                        elements.forEach(el => {
+                            // Colours
+                            const colorClass = asset.status_colors[metric];
+                            const target = el.tagName === 'INPUT' ? el.closest('td') : el;
+                            
+                            if (target) {
+                                target.classList.remove('bg-red', 'bg-orange', 'bg-green', 'bg-grey');
+                                if (colorClass) target.classList.add(colorClass);
+                            }
+
+                            // Values
+                            if (document.activeElement === el) return; // Don't interrupt typing
+
+                            const rawVal = asset[metric];
+                            if (rawVal === undefined || rawVal === null) return;
+
+                            // Check the type from get_schema()
+                            if (column.type === 'monitor_input' || el.tagName === 'INPUT') {
+                                // Inputs: update .value to preserve the box
+                                el.value = rawVal; 
+                            } else if (column.type !== 'visualizer' && column.type !== 'ticker') {
+                                // Display cells: apply suffixes and formatting
+                                const suffix = column.suffix || '';
+                                let displayVal;
+
+                                if (column.type === 'finance' && suffix === ' €') {
+                                    displayVal = currencyFormat(rawVal);
+                                } else if (typeof rawVal === 'number') {
+                                    // Only use decimals for non-ESG numbers
+                                    displayVal = rawVal.toFixed(2) + suffix;
+                                } else {
+                                    displayVal = rawVal + suffix;
+                                }
+                                el.textContent = displayVal;
+                            }
+                        });
+                    });
                 });
-            },
-
-            updateStockMetrics(stocks, ticker) {
-                const yieldData = stocks.portfolio_yield_data;
-                
-                // Update yield and growth
-                this.setMetricWithColor('portfolio-yield-display', yieldData.div_yield, [2, 4], 'high_is_better', '%');
-                this.setMetricWithColor('portfolio-div-growth-display', yieldData.div_growth, [4, 8], 'high_is_better', '%');
-                this.setText('annual-dividends', currencyFormat(stocks.annual_dividends));
-
-                // Update the monthly payment count grid
-                const dataRow = document.getElementById('total-month-data-row');
-                if (dataRow && stocks.monthly_income_data) {
-                    dataRow.innerHTML = stocks.monthly_income_data.counts.map(count => `
-                        <span class="month-data-item ${count > 0 ? 'paid' : ''}">
-                            ${count}
-                        </span>
-                    `).join('');
-                }
-                
-                // Apply ESG background colours
-                if (ticker) this.applyESGColors(ticker);
             },
 
             updateCharts(data, subPortfolio, assetType) {
@@ -362,45 +401,6 @@
             setText(id, text) {
                 const el = document.getElementById(id);
                 if (el) el.textContent = text;
-            },
-            
-            applyESGColors(ticker) {
-                ['env', 'soc', 'gov', 'cont'].forEach(key => {
-                    const input = document.querySelector(`input[name="${key}_${ticker}"]`);
-                    if (input) {
-                        const val = parseInt(input.value) || 0;
-                        const cell = input.closest('td');
-                        if (cell) {
-                            cell.className = ''; // Reset classes
-                            if (val < 4) cell.classList.add('bg-red');
-                            else if (val < 7) cell.classList.add('bg-orange');
-                            else cell.classList.add('bg-green');
-                        }
-                    }
-                });
-            },
-
-            // Helper to set percentage text and background colour based on thresholds
-            setMetricWithColor(id, value, thresholds, direction = 'high_is_better', suffix = '') {
-                const el = document.getElementById(id);
-                if (!el) return;
-                
-                const displayValue = suffix === '%' ? (value).toFixed(2) : value.toFixed(2);
-                el.textContent = displayValue + suffix;
-                el.classList.remove('bg-red', 'bg-orange', 'bg-green');
-
-                const [low, high] = thresholds;
-
-                if (direction === 'high_is_better') {
-                    if (value < low) el.classList.add('bg-red');
-                    else if (value <= high) el.classList.add('bg-orange');
-                    else el.classList.add('bg-green');
-                } else {
-                    // Low is better
-                    if (value > high) el.classList.add('bg-red');
-                    else if (value >= low) el.classList.add('bg-orange');
-                    else el.classList.add('bg-green');
-                }
             },
 
             monitorStatusChanges() {
