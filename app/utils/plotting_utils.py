@@ -11,7 +11,8 @@ import pandas as pd
 from scipy import stats
 
 def plot_efficient_frontier_and_portfolios(
-    optimisation_results, asset_analysers
+    results,
+    asset_analysers
 ):
     """
     Plots the efficient frontier, Monte Carlo simulations, individual stocks,
@@ -63,10 +64,14 @@ def plot_efficient_frontier_and_portfolios(
 #                 [r * 100 for r in static_results['efficient_frontier_returns']],
 #                 color='blue', linestyle='-', linewidth=2, label='Efficient frontier (Static)')
 
-    if RUN_STATIC_PORTFOLIO and RUN_MVO_OPTIMISATION and optimisation_results['mvp'] and optimisation_results['efficient_frontier_std_devs']:
+    # Extract sub-dictionaries for readability
+    opt_res = results.get("optimisation")
+    cml_res = results.get("cml")
+
+    if RUN_STATIC_PORTFOLIO and RUN_MVO_OPTIMISATION and opt_res and opt_res['efficient_frontier_std_devs']:
         # Create a list of hover strings for each point
         hover_texts = []
-        for w_set in optimisation_results.get('efficient_frontier_weights', []):
+        for w_set in opt_res.get('efficient_frontier_weights', []):
             # Only show assets with a weight > 0.5% to keep it clean
             weight_str = "<br>".join([
                 f"{tickers[i]}: {w*100:.1f}%" 
@@ -75,8 +80,8 @@ def plot_efficient_frontier_and_portfolios(
             hover_texts.append(weight_str)
         
         fig.add_trace(go.Scatter(
-            x=[s * 100 for s in optimisation_results['efficient_frontier_std_devs']],
-            y=[r * 100 for r in optimisation_results['efficient_frontier_returns']],
+            x=[s * 100 for s in opt_res['efficient_frontier_std_devs']],
+            y=[r * 100 for r in opt_res['efficient_frontier_returns']],
             mode='lines',
             line=dict(color='blue', width=2),
             name='Efficient frontier (Static)',
@@ -96,28 +101,61 @@ def plot_efficient_frontier_and_portfolios(
 #                 [r * 100 for r in dynamic_results['efficient_frontier_returns']],
 #                 color='red', linestyle='-', linewidth=2, label='Efficient frontier (Dynamic)')
 
+    # Plot CML
+        fig.add_trace(go.Scatter(
+            x=[v * 100 for v in cml_res['vols']],
+            y=[r * 100 for r in cml_res['returns']],
+            mode='lines',
+            line=dict(color='red', width=2, dash='dash'),
+            name='CML'
+        ))
+
+        # Mark the tangency portfolio point
+        t_vol = cml_res['tangency_vol']
+        t_ret = cml_res['tangency_ret']
+        t_weights = cml_res['tangency_weights']
+
+        t_hover = "<br>".join([
+            f"{tickers[i]}: {w*100:.1f}%" 
+            for i, w in enumerate(t_weights) if w > 0.005
+        ])
+
+        fig.add_trace(go.Scatter(
+            x=[t_vol * 100],
+            y=[t_ret * 100],
+            mode='markers',
+            marker=dict(color='red', size=10, symbol='star'),
+            name='Tangency portfolio',
+            customdata=[t_hover],
+            hovertemplate=(
+                "<b>Tangency portfolio</b><br>" +
+                "Volatility: %{x:.2f}%<br>" +
+                "Return: %{y:.2f}%<extra></extra>"+
+                "------------------<br>" +
+                "%{customdata}<extra></extra>"
+            )
+        ))
 
     # Plot individual assets in the return/std space
     colors = px.colors.qualitative.Dark24  # or any palette you prefer
-    
-    for i, analyser in enumerate(asset_analysers.values()):
-        annual_return = analyser.annual_return
-        volatility = analyser.annualised_volatility
-        ticker = analyser.asset.ticker
+    all_vols = []
+    all_rets = []
+
+    for i, (ticker, analyser) in enumerate(asset_analysers.items()):
+        ret = analyser.annual_return
+        vol = analyser.annualised_volatility
+        all_vols.append(vol)
+        all_rets.append(ret)
 
         fig.add_trace(go.Scatter(
-            x=[volatility * 100],
-            y=[annual_return * 100],
+            x=[vol * 100],
+            y=[ret * 100],
             mode='markers+text',
             marker=dict(size=12, color=colors[i % len(colors)], line=dict(width=1.5, color='black')),
             text=[ticker],
             textposition='top center',
-            name=ticker,
-            hovertemplate=(
-                f"<b>{ticker}</b><br>" +
-                f"Volatility: {volatility*100:.2f}%<br>" +
-                f"Return: {annual_return*100:.2f}%<extra></extra>"
-            )
+            name='',
+            showlegend=False
         ))
 
 
@@ -129,26 +167,25 @@ def plot_efficient_frontier_and_portfolios(
 #                        label=f"EWP (Static), Sharpe ratio={static_results['ewp']['Sharpe Ratio']:.2}")
                         
         # Plot the MVP (Static)
-        if RUN_MVO_OPTIMISATION and optimisation_results['mvp'] and optimisation_results['mvp']['success']:
-            mvp = optimisation_results['mvp']['metrics']
+        if RUN_MVO_OPTIMISATION and opt_res['mvp'] and opt_res['mvp']['success']:
+            mvp_metrics = opt_res['mvp']['metrics']
             fig.add_trace(go.Scatter(
-                x=[mvp['Volatility'] * 100],
-                y=[mvp['Return'] * 100],
+                x=[mvp_metrics['Volatility'] * 100],
+                y=[mvp_metrics['Return'] * 100],
                 mode='markers',
                 marker=dict(size=16, symbol='star', color='darkblue', opacity=0.7, line=dict(width=1.5, color='darkblue')),
-                name='MV Portfolio (Static)',
-                hovertemplate=(
-                    f"<b>Minimum Variance Portfolio</b><br>" +
-                    f"Volatility: {mvp['Volatility']*100:.2f}%<br>" +
-                    f"Return: {mvp['Return']*100:.2f}%<extra></extra>"
-                )
+                name='MV portfolio'
             ))
             
+    max_v = max(all_vols) * 110 if all_vols else 30
+    min_r = min(all_rets) * 90 if all_rets else 0
+    max_r = max(all_rets) * 110 if all_rets else 20
+
     fig.update_layout(
-        xaxis_title="Annualised volatility (%)",
-        yaxis_title="Annualised return (%)",
+        xaxis=dict(title="Annualised Volatility (%)", range=[0, max_v]),
+        yaxis=dict(title="Annualised Return (%)", range=[min_r, max_r]),
         template='plotly_white',
-        hovermode='closest'
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
     )
     
     return fig
@@ -484,7 +521,7 @@ def create_price_chart(stocks_data, start_date=None, end_date=None, rolling_wind
     
     return fig
     
-def create_returns_distribution_chart(returns):
+def create_returns_distribution_chart(returns, student_t_params=None):
     """
     Distribution plot for returns.
     
@@ -510,8 +547,8 @@ def create_returns_distribution_chart(returns):
     
     # Create histogram
     fig = go.Figure()
-    data_min = data.min()
-    data_max = data.max()
+    # data_min = data.min()
+    # data_max = data.max()
     #print("data_min: ", data_min)
     #print("data_max: ", data_max)
     #print("len data: ", len(data))
@@ -546,8 +583,11 @@ def create_returns_distribution_chart(returns):
             ))
             
     # Add a Student's t fit
-    params = stats.t.fit(data) # Maximum Likelihood Estimation
-    student_t = stats.t.pdf(x_range,*params)
+    #params = stats.t.fit(data) # Maximum Likelihood Estimation
+    if student_t_params is None:
+        student_t_params = stats.t.fit(data)
+
+    student_t = stats.t.pdf(x_range,*student_t_params)
     
     fig.add_trace(go.Scatter(
                 x=x_range.tolist(),

@@ -103,6 +103,23 @@ class AssetAnalyser:
     @property
     def annualised_volatility(self):
         return self.percent_returns.std() * np.sqrt(self.ann_factor)
+    
+    @Metric(label="Hist. VaR 95", suffix='%')
+    def percent_historical_var(self):
+        return historical_var(self.percent_returns, 0.95)*100
+    
+    @Metric(label="Hist. CVaR 95", suffix='%')
+    def percent_historical_cvar(self):
+        return historical_cvar(self.percent_returns, 0.95)*100
+    
+    @cached_property
+    def student_t_params(self):
+        # Fit Student's t distribution to returns once and cache
+        return stats.t.fit(self.percent_returns)
+
+    @Metric(label="Student-t VaR 95", suffix='%')
+    def percent_student_t_var(self):
+        return student_t_var(self.student_t_params, 0.95)*100
 
 
 class PortfolioAnalyser:
@@ -212,7 +229,6 @@ class PortfolioAnalyser:
         return data
     
     def to_dict(self):
-        """The 'Blueprint' for the entire test page analytics."""
         return {
             'schema': Metric.registry,
             'assets': self.get_individual_metrics_data(),
@@ -222,50 +238,23 @@ class PortfolioAnalyser:
             }
         }
 
-    # # Function to calculate Beta
-    # def calculate_beta(self, daily_returns, benchmark_returns):
-    #     """
-    #     Calculates the beta of a stock or portfolio against a benchmark.
-    #     Beta = Covariance(Asset, Benchmark) / Variance(Benchmark)
-    #     Args:
-    #         daily_returns (pd.Series): Daily returns of the asset/portfolio.
-    #         benchmark_returns (pd.Series): Daily returns of the benchmark.
-    #     Returns:
-    #         float: The calculated beta.
-    #     """
-    #     # Ensure returns have the same dates
-    #     common_dates = daily_returns.index.intersection(benchmark_returns.index)
-    #     returns = daily_returns.loc[common_dates]
-    #     bench_returns = benchmark_returns.loc[common_dates]
+    # Function to calculate Beta
+    def calculate_beta(self, returns, benchmark_returns):
+        """
+        Beta = Covariance(Asset, Benchmark) / Variance(Benchmark)
+        """
+        covariance = returns.cov(benchmark_returns)
+        benchmark_variance = benchmark_returns.var()
         
-    #     # Calculate covariance and variance
-    #     covariance = returns.cov(bench_returns)
-    #     benchmark_variance = bench_returns.var()
-        
-    #     # Check if benchmark_variance is a Series and extract its value
-    #     if isinstance(benchmark_variance, pd.Series):
-    #         if benchmark_variance.item() == 0:
-    #             return 0.0
-    #     elif benchmark_variance == 0:
-    #         return 0.0
-        
-    #     return covariance / benchmark_variance
+        return covariance / benchmark_variance
 
-    # # Function to calculate Alpha
-    # def calculate_alpha(self, annual_return, beta, risk_free_rate, benchmark_annual_return):
-    #     """
-    #     Calculates the alpha of a stock or portfolio.
-    #     Alpha = R_stock/portfolio - [R_f + Beta * (R_benchmark - R_f)]
-    #     Args:
-    #         annual_return (float): The annualised return of the asset/portfolio.
-    #         beta (float): The beta of the asset/portfolio.
-    #         risk_free_rate (float): The annualised risk-free rate.
-    #         benchmark_annual_return (float): The annualised return of the benchmark.
-    #     Returns:
-    #         float: The calculated alpha.
-    #     """
-    #     expected_return = risk_free_rate + beta * (benchmark_annual_return - risk_free_rate)
-    #     return annual_return - expected_return
+    # Function to calculate Alpha
+    def calculate_alpha(self, annual_return, beta, risk_free_rate, benchmark_annual_return):
+        """
+        Alpha = R_stock/portfolio - [R_f + Beta * (R_benchmark - R_f)
+        """
+        expected_return = risk_free_rate + beta * (benchmark_annual_return - risk_free_rate)
+        return annual_return - expected_return
         
 
     def portfolio_return(self, weights, annual_returns):
@@ -377,6 +366,20 @@ class PortfolioAnalyser:
         
 
 # Standalone functions
+
+def historical_var(returns, confidenceLevel):
+    return np.quantile(returns, 1 - confidenceLevel)
+
+def historical_cvar(returns, confidenceLevel):
+    return returns[returns <= historical_var(returns,confidenceLevel)].mean()
+
+def student_t_var(params, confidenceLevel):
+    dof, loc, scale = params
+    # Calculate the quantile for the left tail (VaR)
+    quantile = stats.t.ppf(1 - confidenceLevel, dof, loc=loc, scale=scale)
+    # Return quantile as a number (e.g., decimal return)
+    return quantile
+
 def sharpe_ratio(returns, risk_free_rate=0.0, ann_factor=1):
     """
     Calculate the Sharpe ratio

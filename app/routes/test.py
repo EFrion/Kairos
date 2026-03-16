@@ -90,7 +90,7 @@ class PortfolioDataAPI(MethodView):
             fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20, 50, 200])
         elif mode == 'returns':
             returns_df = asset_analyser.percent_returns.to_frame(name=ticker)
-            fig = plotting_utils.create_returns_distribution_chart(returns_df)
+            fig = plotting_utils.create_returns_distribution_chart(returns_df, asset_analyser.student_t_params)
         elif mode == 'map-2dcorr':
             asset_analyser2 = analyser.asset_analysers.get(ticker2)
             if asset_analyser2 is None:
@@ -159,21 +159,11 @@ def get_portfolio_data():
 
             bounds, constraints = opt.setup_optimisation_constraints(inputs['tickers'], 0.2, True)
 
-            optimisation_results = opt.perform_static_optimisation(
-                inputs['annual_returns'],
-                inputs['covariance_matrix'],
-                inputs['initial_weights'],
-                bounds,
-                constraints,
-                inputs['daily_returns'],
-                inputs['risk_free_rate']
-            )
+            optimisation_results = opt.perform_full_analysis(bounds, constraints)
 
             # Save to cache
             with open(cache_path, 'wb') as f:
                 pickle.dump(optimisation_results, f)
-            #print("opt std: ", optimisation_results['efficient_frontier_std_devs'])
-            #print("opt ret: ", optimisation_results['efficient_frontier_returns'])
             
         fig = plotting_utils.plot_efficient_frontier_and_portfolios(optimisation_results, analyser.asset_analysers)
     
