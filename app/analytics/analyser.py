@@ -1,7 +1,21 @@
 import numpy as np
 import pandas as pd
+import nltk
+import pytrends
+import time
 from scipy import stats
 from functools import cached_property
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from pytrends.request import TrendReq
+from pytrends.exceptions import TooManyRequestsError
+from sklearn.decomposition import TruncatedSVD
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+nltk.download('/usr/share/punkt')
+nltk.download('/usr/share/punkt_tab')
+pytrends = TrendReq(hl='en-US', tz=360)
 
 class Metric:
     registry = []
@@ -34,11 +48,32 @@ class AssetAnalyser:
         self.ann_factor = 252
         self.risk_free_rate = 0.0
 
+    @cached_property
+    def trend(self):
+        pytrends = TrendReq()
+        clean_ticker = self.asset.ticker.split('.')[0]
+
+        for _ in range(3):
+            try:
+                pytrends.build_payload([clean_ticker], timeframe='today 12-m')
+                return pytrends.interest_over_time()
+            except TooManyRequestsError:
+                time.sleep(5)
+        return pd.DataFrame()
+    
+    @cached_property
+    def mean_percent_returns(self):
+        return self.percent_returns.mean()
+    
+    @cached_property
+    def std_percent_returns(self):
+        return self.percent_returns.std()
+    
     @Metric(label="Sharpe ratio")
     def percent_sharpe_ratio(self):
         return sharpe_ratio(self.percent_returns, self.risk_free_rate)
     
-    @Metric(label="Semivariance") # TODO returns?
+    @Metric(label="Semivariance") # TODO choice of returns?
     def percent_semivariance(self):
         return semivariance(self.percent_returns)
     
@@ -98,11 +133,11 @@ class AssetAnalyser:
     
     @property
     def annual_return(self):
-        return self.percent_returns.mean() * self.ann_factor
+        return self.mean_percent_returns * self.ann_factor
 
     @property
     def annualised_volatility(self):
-        return self.percent_returns.std() * np.sqrt(self.ann_factor)
+        return self.std_percent_returns * np.sqrt(self.ann_factor)
     
     @Metric(label="Hist. VaR 95", suffix='%')
     def percent_historical_var(self):
@@ -114,12 +149,15 @@ class AssetAnalyser:
     
     @cached_property
     def student_t_params(self):
-        # Fit Student's t distribution to returns once and cache
         return stats.t.fit(self.percent_returns)
 
     @Metric(label="Student-t VaR 95", suffix='%')
     def percent_student_t_var(self):
         return student_t_var(self.student_t_params, 0.95)*100
+    
+    @cached_property
+    def standardised_percent_returns(self):
+        return (self.percent_returns-self.self.percent_returns.mean)
 
 
 class PortfolioAnalyser:

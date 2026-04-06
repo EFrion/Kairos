@@ -10,6 +10,96 @@ import plotly.express as px
 import pandas as pd
 from scipy import stats
 
+def create_trends_chart(interest_over_time_df, terms=None, start_date=None, end_date=None, rolling_windows=None):
+    """
+    Line chart showing Google Trends interest over time for multiple terms.
+
+    Args:
+        interest_over_time_df (pd.DataFrame): DataFrame with 'Date' index and terms as columns.
+        terms (list): List of terms to plot. If None, plot all columns.
+        start_date (str/datetime): Start date for filtering (e.g., '2024-01-01').
+        end_date (str/datetime): End date for filtering.
+        rolling_windows (list): List of integers for rolling means, e.g., [7, 30].
+
+    Returns:
+        go.Figure: The Plotly figure object.
+    """
+
+    df = interest_over_time_df.copy()
+
+    # Filter terms if specified
+    if terms:
+        df = df[terms]
+
+    # Filter data based on dates
+    if start_date:
+        start_ts = pd.to_datetime(start_date)
+        if df.index.tz:
+            start_ts = start_ts.tz_localize(df.index.tz)
+        df = df[df.index >= start_ts]
+
+    if end_date:
+        end_ts = pd.to_datetime(end_date)
+        if df.index.tz:
+            end_ts = end_ts.tz_localize(df.index.tz)
+        df = df[df.index <= end_ts]
+
+    # Create the figure
+    fig = go.Figure()
+
+    # Add a line for each term
+    for term in df.columns:
+        term_series = df[term].dropna()
+
+        if not term_series.empty:
+            fig.add_trace(go.Scatter(
+                x=term_series.index.tolist(),
+                y=term_series.values.tolist(),
+                mode='lines',
+                name=term,
+                hovertemplate=f"<b>{term}</b><br>Trends Index: %{{y:.2f}}<extra></extra>"
+            ))
+
+        # Add rolling averages if specified
+        if rolling_windows:
+            for window in rolling_windows:
+                rolling_mean = term_series.rolling(window=window).mean()
+                fig.add_trace(go.Scatter(
+                    x=rolling_mean.index.tolist(),
+                    y=rolling_mean.values.tolist(),
+                    mode='lines',
+                    name=f"{term} ({window}d SMA)",
+                    line=dict(dash='dash', width=1.5),
+                    hovertemplate=f"{term} {window}d SMA: %{{y:.2f}}<extra></extra>"
+                ))
+
+    # Update layout
+    fig.update_layout(
+        title='Interest over time',
+        xaxis_title='Date',
+        yaxis_title='Google Trends index',
+        hovermode="x unified",
+        template="plotly_white",
+        margin=dict(l=20, r=20, t=60, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        xaxis=dict(
+            rangeslider=dict(visible=True),
+            type='date'
+        ),
+        yaxis=dict(
+            autorange=True,
+            title='Trends Index'
+        )
+    )
+
+    return fig
+
 def plot_efficient_frontier_and_portfolios(
     results,
     asset_analysers

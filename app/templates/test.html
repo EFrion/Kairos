@@ -76,6 +76,7 @@
                 <div class="tab active-tab" data-mode="price">Price chart</div>
                 <div class="tab" data-mode="returns">Returns</div>
                 <div class="tab" data-mode="map-2dcorr">2D correlation</div>
+                <div class="tab" data-mode="trend">Trend</div>
                 <div class="tab" data-mode="sentiment">Sentiment (soon)</div>
             </div>
 
@@ -101,8 +102,7 @@
             
             <tbody>
                 {% for ticker, metrics in analysis.assets.items() %}
-                    <tr class="ticker-row {% if ticker == selected_ticker %}active-row{% endif %}" 
-                        onclick="currentTicker='{{ ticker }}'; updateView();">
+                    <tr>
                         <td style="font-weight: bold;">{{ ticker }}</td>
                         {% for col in analysis.schema %}
                             <td>{{ metrics[col.id] | format_finance }} {{ col.suffix }}</td>
@@ -111,8 +111,6 @@
                 {% endfor %}
             </tbody>
         </table>
-
-        
     </div>
     
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
@@ -155,7 +153,7 @@
                 return await response.json();
             }
 
-            // --- Asset Level Logic ---
+            // Asset Level Logic
             async updateView() {
                 this.dom.tickerTitle.innerText = this.state.currentTicker;
                 

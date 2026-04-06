@@ -100,6 +100,9 @@ class PortfolioDataAPI(MethodView):
             df2 = asset_analyser2.data.to_frame(name=ticker2)
 
             fig = plotting_utils.create_2d_correlation_map(df1, df2)
+        elif mode == 'trend':
+            trend_df = asset_analyser.trend.drop(columns=['isPartial'], errors='ignore')
+            fig = plotting_utils.create_trends_chart(trend_df, rolling_windows=[7])
         elif mode == 'sentiment':
             # Placeholder for future sentiment plot
             fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20, 50, 200])
