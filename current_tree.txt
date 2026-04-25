@@ -1,16 +1,29 @@
 .
 ├── app
+│   ├── analytics
+│   │   ├── analyser.py
+│   │   ├── optimiser.py
+│   │   └── __pycache__
+│   │       ├── analyser.cpython-312.pyc
+│   │       └── optimiser.cpython-312.pyc
 │   ├── __init__.py
+│   ├── models.py
 │   ├── __pycache__
-│   │   └── __init__.cpython-312.pyc
+│   │   ├── __init__.cpython-312.pyc
+│   │   └── models.cpython-312.pyc
 │   ├── routes
 │   │   ├── cashflow.py
 │   │   ├── portfolio.py
 │   │   ├── __pycache__
 │   │   │   ├── cashflow.cpython-312.pyc
 │   │   │   ├── portfolio.cpython-312.pyc
+│   │   │   ├── research.cpython-312.pyc
 │   │   │   └── test.cpython-312.pyc
-│   │   └── test.py
+│   │   └── research.py
+│   ├── services
+│   │   ├── data_fetching.py
+│   │   └── __pycache__
+│   │       └── data_fetching.cpython-312.pyc
 │   ├── static
 │   │   ├── app.js
 │   │   └── style.css
@@ -18,42 +31,60 @@
 │   │   ├── cashflow.html
 │   │   ├── macros.html
 │   │   ├── portfolio.html
-│   │   └── test.html
+│   │   └── research.html
+│   ├── tests
+│   │   └── test_finance_data.py
 │   └── utils
+│       ├── config.py
 │       ├── database.py
 │       ├── finance_data.py
 │       ├── plotting_utils.py
 │       ├── __pycache__
+│       │   ├── config.cpython-312.pyc
 │       │   ├── database.cpython-312.pyc
 │       │   ├── finance_data.cpython-312.pyc
 │       │   ├── plotting_utils.cpython-312.pyc
-│       │   └── storage_utils.cpython-312.pyc
-│       └── storage_utils.py
+│       │   ├── storage_utils.cpython-312.pyc
+│       │   └── time_debug.cpython-312.pyc
+│       ├── storage_utils.py
+│       ├── test
+│       │   ├── last_fetch_date.json
+│       │   ├── sector_benchmarks.json
+│       │   ├── stocks_metrics_static.json
+│       │   ├── stocks_price_history_15m.csv
+│       │   └── stocks_price_history_1h.csv
+│       └── time_debug.py
 ├── app.py
 ├── config.py
+├── current_tree.txt
 ├── data
+│   ├── crypto_cont.json
+│   ├── crypto_env.json
+│   ├── crypto_gov.json
 │   ├── crypto_list.json
 │   ├── crypto_metrics_static.json
-│   ├── crypto_price_history_4h.csv
+│   ├── crypto_price_history_15m.csv
 │   ├── crypto_prices.json
 │   ├── crypto_shares.json
+│   ├── crypto_soc.json
+│   ├── frontier_cache.pkl
 │   ├── global_cash.json
 │   ├── last_fetch_date.json
-│   ├── metrics_static.json
+│   ├── sector_benchmarks.json
 │   ├── stocks_cont.json
 │   ├── stocks_env.json
 │   ├── stocks_gov.json
 │   ├── stocks_list.json
 │   ├── stocks_metrics_static.json
+│   ├── stocks_price_history_15m.csv
 │   ├── stocks_price_history_1d.csv
-│   ├── stocks_price_history_4h.csv
 │   ├── stocks_prices.json
 │   ├── stocks_shares.json
-│   └── stocks_soc.json
+│   ├── stocks_soc.json
+│   └── user_config.json
 ├── instance
 │   └── finance_app.db
 ├── LICENSE
-├── output.txt
 ├── __pycache__
 │   ├── app.cpython-312.pyc
 │   ├── config.cpython-312.pyc
@@ -62,10 +93,6 @@
 │   ├── plotting_utils.cpython-312.pyc
 │   └── storage_utils.cpython-312.pyc
 ├── README.md
-├── requirements.txt
-└── test
-    ├── last_fetch_date.json
-    ├── stocks_metrics_static.json
-    └── stocks_price_history_4h.csv
+└── requirements.txt
 
-13 directories, 56 files
+18 directories, 78 files

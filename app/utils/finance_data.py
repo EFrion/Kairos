@@ -1,174 +1,350 @@
 import os
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta, date
-from pandas.tseries.offsets import Day, BDay
+from datetime import datetime, timedelta, date, timezone
+from pandas.tseries.offsets import BDay
 import numpy as np
 from scipy.stats import linregress
 import json
+import logging
 import matplotlib.pyplot as plt
-from flask import current_app
+from app.utils.config import AppConfig, STALE_THRESHOLD, INTERVAL_MAX_LOOKBACK
+from app.utils.time_debug import timed
 
-# TODO automate this to fetch any currency pair
-def fetch_exchange_rates(cache_dir):
-    """Fetches EUR/USD and EUR/CHF rates using yfinance."""
-    #print("fetch_exchange_rates called")
+# To compare the P/B ratio of a stock to the five biggest companies by market cap, I use the benchmark below
+# TODO automate the choice of companies, and add the remaining sectors
+SECTOR_BENCHMARK_MAP = {
+    'Technology': ['AAPL', 'MSFT','NVDA','TSM','AVGO'],
+    'Financial Services': ['JPM', 'BRK-A','MA','BAC','V'],
+    'Industrials': ['GE', 'CAT', 'RTX', 'SIE.DE', 'AIR.PA'],
+    'Utilities': ['NEE', 'IBDSF', 'DOGEF', 'ENLAY', 'CEG'],
+    'Healthcare': ['LLY', 'JNJ', 'AZN', 'UNH', 'ROG.SW'],
+    'Real Estate': ['WELL', 'PLD', 'AMT', 'EQIX', 'SPG'],
+    'Communication Services': ['GOOGL', 'META', 'TCEHY', 'NFLX', 'SFTBY'],
+    'Consumer Cyclical': ['AMZN', 'TSLA', 'LVMUY', 'BABAF', 'HD'],
+}
+
+class FinanceDataManager:
+    """
+    Owns all yfinance I/O for one asset category (e.g. 'stocks', 'crypto').
+    """
     
-    os.makedirs(cache_dir, exist_ok=True)
-    date_cache_path = os.path.join(cache_dir, f"last_fetch_date.json")
-    
-    # Default fallback values
-    exchange_data = {
-        "last_call_fx": "1900-01-01",
-        "usd_eur_rate": 1.0,
-        "chf_eur_rate": 1.0
+    DIV_CAGR_YEARS = 10
+    BENCHMARK_REFRESH_DAYS = 7
+
+    STALE_THRESHOLD = {
+        "1m": timedelta(minutes=1), 
+        "2m": timedelta(minutes=2),
+        "5m": timedelta(minutes=5),
+        "15m": timedelta(minutes=15),
+        "30m": timedelta(minutes=30),
+        "1h": timedelta(minutes=60),
+        "90m": timedelta(minutes=90),
+        "1d": timedelta(days=1),
     }
-    
-    # Save new values
-    if os.path.exists(date_cache_path) and os.path.getsize(date_cache_path) > 0:
-        try:
-            with open(date_cache_path, 'r') as f:
-                exchange_data.update(json.load(f))
-            print("\nLoaded last exchange rate: ", exchange_data["last_call_fx"])
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Date cache file corrupted or empty, ignoring: {e}")
-    else:
-        print("\nDate cache file is 0 bytes, ignoring.")
-        
-    # Get last time function was called
-    last_call_fx = datetime.strptime(exchange_data["last_call_fx"], "%Y-%m-%d").date()
-    #print("last_call_fx: ", last_call_fx)
-    
-    # Lazy loading logic (once per day)
-    if date.today()>last_call_fx:
-        print("Fetching exhange rates.")        
 
-        try:
-            # Fetch EUR/USD rate
-            eur_usd_ticker = yf.Ticker("EURUSD=X")
-            eur_usd_hist = eur_usd_ticker.history(period="1d")
-            if not eur_usd_hist.empty and eur_usd_hist["Close"].dropna().iloc[-1] > 0:
-                exchange_data["usd_eur_rate"] = 1 / eur_usd_hist["Close"].dropna().iloc[-1] # Reciprocal (want EUR)
+    INTERVAL_MAX_LOOKBACK = {
+        "1m": timedelta(days=59), # safe margin under yfinance's ~60d cap for sub-daily
+        "2m": timedelta(days=59),
+        "5m": timedelta(days=59),
+        "15m": timedelta(days=59),
+        "30m": timedelta(days=59),
+        "1h":  timedelta(days=59), 
+        "90m": timedelta(days=59),
+        "1d":  timedelta(days=365),
+    }
+
+    def __init__(self, cache_dir: str, category_name: str, config: AppConfig):
+        self.config = config
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True) 
+
+        self.category = category_name
+
+        # Pull constants from config module
+        self.STALE_THRESHOLD = STALE_THRESHOLD
+        self.INTERVAL_MAX_LOOKBACK = INTERVAL_MAX_LOOKBACK
+
+        # Derived paths — computed once, used everywhere
+        self._metrics_path = os.path.join(cache_dir, f"{category_name}_metrics_static.json")
+        self._fx_path      = os.path.join(cache_dir, "last_fetch_date.json")
+
+        # In-memory caches
+        self._hist_prices: dict[str, pd.DataFrame] = {}   # keyed by interval
+        self._static_metrics: dict = {}
+        self._usd_eur: float | None = None
+        self._chf_eur: float | None = None
+
+        self._weekend_sync_done = False
+
+    def _get_price_path(self, interval: str) -> str:
+        return os.path.join(self.cache_dir, f"{self.category}_price_history_{interval}.csv")
+
+    # ------------------------------------------------------------------ #
+    #  Public interface                                                    #
+    # ------------------------------------------------------------------ #
+    @timed
+    def get_metrics(self, tickers: list[str], interval="4h", force=False) -> list[dict]:
+        """Main entry point. Returns metrics list for the requested tickers."""
+        self._ensure_fx_rates()
+        self._ensure_prices(tickers, interval, force)
+        return self._ensure_metrics(tickers, interval, force)
+
+    def remove_ticker(self, ticker: str, interval: str):
+        """Remove a ticker from both the CSV and the metrics JSON."""
+        self._drop_from_csv(ticker, interval)
+        self._drop_from_json(ticker)
+
+    # ------------------------------------------------------------------ #
+    #  Private helpers — each does ONE thing                              #
+    # ------------------------------------------------------------------ #
+
+    ### Orchestrators 
+    def _ensure_fx_rates(self): # TODO Automatic currency fetching. Currently focuses on USD and CHF
+        """Fetch FX rates at most once per day, cache in memory too."""
+        if self._usd_eur is not None:
+            return
+        
+        #print("fetch_exchange_rates called")
+        date_cache_path = os.path.join(self.cache_dir, f"last_fetch_date.json")
+        
+        # Default fallback values
+        exchange_data = {
+            "last_call_fx": "1900-01-01",
+            "usd_eur_rate": 1.0,
+            "chf_eur_rate": 1.0
+        }
+        
+        # Save new values
+        if os.path.exists(date_cache_path) and os.path.getsize(date_cache_path) > 0:
+            try:
+                with open(date_cache_path, 'r') as f:
+                    exchange_data.update(json.load(f))
+                print("\nLoaded last exchange rate: ", exchange_data["last_call_fx"])
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Date cache file corrupted or empty, ignoring: {e}")
+        else:
+            print("\nDate cache file is 0 bytes, ignoring.")
             
-            # Fetch EUR/CHF rate
-            eur_chf_ticker = yf.Ticker("EURCHF=X")
-            eur_chf_hist = eur_chf_ticker.history(period="1d")
-            if not eur_chf_hist.empty and eur_chf_hist["Close"].dropna().iloc[-1] > 0:
-                exchange_data["chf_eur_rate"] = 1 / eur_chf_hist["Close"].dropna().iloc[-1] # Reciprocal (want EUR)
+        # Get last time function was called
+        last_call_fx = datetime.strptime(exchange_data["last_call_fx"], "%Y-%m-%d").date()
+        print("last_call_fx: ", last_call_fx)
+        
+        # Lazy loading logic (once per day)
+        if date.today()>last_call_fx:
+            print("Fetching exhange rates.")        
+
+            try:
+                # Fetch EUR/USD rate
+                eur_usd_ticker = yf.Ticker("EURUSD=X")
+                eur_usd_hist = eur_usd_ticker.history(period="1d")
+                if not eur_usd_hist.empty and eur_usd_hist["Close"].dropna().iloc[-1] > 0:
+                    exchange_data["usd_eur_rate"] = 1 / eur_usd_hist["Close"].dropna().iloc[-1] # Reciprocal (want EUR)
                 
-            exchange_data["last_call_fx"] = date.today().isoformat()
-            with open(date_cache_path, 'w') as f:
-                json.dump(exchange_data, f, indent=4)
-            
-            #print(f"Rates fetched: USD/EUR = {usd_eur_rate:.4f}, CHF/EUR = {chf_eur_rate:.4f}")
-
-        except Exception as e:
-            print(f"Error fetching exchange rates: {e}. Using last known/default rates.")
-            
-    else:
-        print("No need to update exchange rates for today.")
-        
-    #print("fetch_exchange_rates out")
-    return exchange_data["usd_eur_rate"], exchange_data["chf_eur_rate"]
-
-
-def calculate_growth_rate(divs_filtered):
-    """Calculates dividend growth rate (CAGR) using log-linear regression."""
-    #print("calculate_growth_rate called")
-    
-    yearly_divs = divs_filtered.groupby(divs_filtered.index.year).sum()
-    yearly_divs = yearly_divs[yearly_divs > 0] # Filter for log calculation
-            
-    growth_rate = "N/A"
-    if len(yearly_divs) >= 2:
-        #print("yearly_divs.index: ", yearly_divs.index)
-        # x-values (years from the start)
-        x = yearly_divs.index - yearly_divs.index[0]
-        #print("x: ", x)
-        
-        # y-values (natural log of dividends)
-        #print("yearly_divs.values: ", yearly_divs.values)
-        y = np.log(yearly_divs.values)
-        #print("y: ", y)
+                # Fetch EUR/CHF rate
+                eur_chf_ticker = yf.Ticker("EURCHF=X")
+                eur_chf_hist = eur_chf_ticker.history(period="1d")
+                if not eur_chf_hist.empty and eur_chf_hist["Close"].dropna().iloc[-1] > 0:
+                    exchange_data["chf_eur_rate"] = 1 / eur_chf_hist["Close"].dropna().iloc[-1] # Reciprocal (want EUR)
+                    
+                exchange_data["last_call_fx"] = date.today().isoformat()
+                self._save_json(date_cache_path, exchange_data)
                 
-        # Log-linear regression: slope is compounded growth rate
-        #slope, intercept, rvalue, _, _ = linregress(x, y) # Uncomment to visualise regression
-        slope, _, _, _, _ = linregress(x, y)
-        #print("slope: ", slope)
-        #print(f"R-squared: {rvalue**2:.6f}")
-        
-        # Uncomment to visualise regression
-#        plt.plot(x, y, 'o', label='original data')
-#        plt.plot(x, intercept + slope*x, 'r', label='fitted line')
-#        plt.legend()
-#        plt.show()
-        
-        growth_rate = np.exp(slope) - 1
-        growth_rate = round(growth_rate, 4)
-        #print("growth_rate: ", growth_rate)
+            except Exception as e:
+                print(f"Error fetching exchange rates: {e}. Using last known/default rates.")
+                
+        else:
+            print("No need to update exchange rates for today.")
             
-    #print("calculate_growth_rate out")
-    
-    return growth_rate
+        self._usd_eur = exchange_data["usd_eur_rate"]
+        self._chf_eur = exchange_data["chf_eur_rate"]
 
+        print(f"Rates fetched: USD/EUR = {self._usd_eur:.4f}, CHF/EUR = {self._chf_eur:.4f}")
 
-def check_price_cache_status(hist_prices, tickers_list, required_days): # TODO Maybe not needed any more?
-    """Determines if a download is needed based on date and ticker coverage."""
-    #print("check_price_cache_status called")
-    
-    today = datetime.today()
-    target_start_date = today - timedelta(days=required_days)
-    
-    # Check for new tickers or empty cache
-    if hist_prices.empty or not all(t in hist_prices.columns for t in tickers_list):
-        print("\nNew tickers detected or cache empty. Fetching full history.")
-        #print("today: ", today)
-        #print("target_start_date: ", target_start_date)
-        #print("today - target_start_date: ", today - target_start_date)
-        return True, target_start_date # Full update
-    
-    # Check if we need to go further back in time. #TODO unnecessary now?
-    earliest_date = hist_prices.index.min()
-    if earliest_date > target_start_date:
-        print(f"History too short (Earliest: {earliest_date.date()}). Fetching from {target_start_date.date()}.")
-        return True, target_start_date
-    
-    # Check if the cache is outdated
-    last_date = hist_prices.index.max()
-    #print("last_date: ", last_date)
-    
-    if last_date < (today - timedelta(days=1)):
-        print(f"Cache is behind. Fetching data.")
-        #print("last_date + timedelta(days=1): ", last_date + timedelta(days=1))
-        return True, last_date + timedelta(days=1) # Increment update
-    
-    #print("check_price_cache_status out")
-    return False, None
-    
-def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, chf_eur_rate):
-    """Get metrics for a single ticker."""
-    #print("calculate_ticker_metrics called")
+    @timed
+    def _ensure_prices( self, tickers: list[str], interval: str,
+                        force: bool = False, target_start: datetime = None) -> None:
+        if interval not in self._hist_prices:
+            df = self._load_csv(self._get_price_path(interval))
+            self._hist_prices[interval] = self._normalize_tz(df)  # point 2
 
-    one_year_ago = datetime.today() - timedelta(days=365)
-    n_years = 10 # Number of years used in CAGR regression
-    n_years_ago = datetime.today() - timedelta(days=n_years * 365)
+        df = self._hist_prices[interval]
+
+        new_tickers = [t for t in tickers if t not in df.columns]
+        if new_tickers:
+            df = self._add_tickers(df, new_tickers, interval)      # point 1
+
+        if target_start:
+            df = self._backfill_if_needed(df, target_start,
+                                        tickers, interval)       # point 3
+
+        if self._is_stale(df, interval) or force:                  # points 4 & 5
+            df = self._refresh(df, tickers, interval)              # point 6
+
+        if df is not self._hist_prices[interval]:                  # only write if changed
+            self._save_csv(df, interval)
+            self._hist_prices[interval] = df
+        
+        return df
+
+    def _ensure_metrics(self, tickers: list[str], interval: str, force: bool) -> list[dict]:
+        if not self._static_metrics:
+            self._static_metrics = self._load_json(self._metrics_path, default={})
+
+        # Slow path — only when needed
+        needs_fetch = force or not all(t in self._static_metrics for t in tickers)
+        if needs_fetch:
+            ticker_objs = yf.Tickers(" ".join(tickers))
+            changed = False
+            for ticker in tickers:
+                if ticker not in self._static_metrics or force:
+                    self._static_metrics[ticker] = self._compute_single_ticker(
+                        ticker, ticker_objs.tickers[ticker], interval
+                    )
+                    sector = self._static_metrics[ticker].get("Sector")
+                    if sector:
+                        self._static_metrics[ticker]["Sector_PB_Benchmark"] = \
+                            self._get_sector_benchmark(sector)
+                    changed = True
+            if changed:
+                self._save_json(self._metrics_path, self._static_metrics)
+
+        # Always inject fresh quote from price cache
+        df = self._hist_prices.get(interval, pd.DataFrame())
+        result = []
+        for ticker in tickers:
+            entry = dict(self._static_metrics[ticker])
+            if not df.empty and ticker in df.columns:
+                last_price = float(df[ticker].dropna().iloc[-1])
+                currency = entry.get("Currency", "EUR")
+                rate = self._usd_eur if currency == 'USD' else \
+                    self._chf_eur if currency == 'CHF' else 1.0
+                entry["Quote"]     = last_price
+                entry["Quote_EUR"] = round(last_price * rate, 4)
+            result.append(entry)
+
+        return result
+
+    ### Workers
+    def _add_tickers(self, df: pd.DataFrame, new_tickers: list[str], interval: str) -> pd.DataFrame:
+        start = df.index.min() if not df.empty else datetime.now() - self.INTERVAL_MAX_LOOKBACK.get(interval, timedelta(days=59))
+        new_prices = self._download_prices(new_tickers, interval, start, datetime.now())
+        return self._merge(new_prices, df)
+
+    def _backfill_if_needed(self, df: pd.DataFrame, target_start: datetime, 
+                            tickers: list[str], interval: str) -> pd.DataFrame:
+        first = df.index.min().tz_localize(None) if not df.empty else None
+        target_ts = pd.to_datetime(target_start).tz_localize(None)
+        if first is not None and target_ts >= first:
+            return df  # Nothing to backfill
+        print(f"Backfilling history from {target_ts} to {first or datetime.now()}")
+        end = first if first is not None else pd.Timestamp.now().tz_localize(None)
+        gap_prices = self._download_prices(tickers, interval, target_ts, end)
+        return self._merge(gap_prices, df) if not gap_prices.empty else df
+
+    @timed
+    def _refresh(self, df: pd.DataFrame, tickers: list[str], interval: str) -> pd.DataFrame:
+        start = df.index.max() if not df.empty else datetime.now() - self.INTERVAL_MAX_LOOKBACK.get(interval, timedelta(days=59))
+        new_prices = self._download_prices(tickers, interval, start, datetime.now())
+        return self._merge(new_prices, df) if not new_prices.empty else df
+
+    def _normalize_tz(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert tz-aware index to naive UTC. Never strips without converting."""
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df = df.copy()
+            df.index = df.index.tz_convert('UTC').tz_localize(None)
+        return df
     
-    # Initialisation
-    data = {"Ticker": ticker, "Currency": "N/A", "Quote":0.0, "Quote_EUR": 0.0, "P/E": 0.0, "Fwd_P/E": 0.0, 
+    @timed
+    def _download_prices(self, tickers: list[str], interval: str, 
+                     start: datetime, end: datetime) -> pd.DataFrame:
+        """Download close prices for each ticker individually and join into one DataFrame."""
+        yf_logger = logging.getLogger("yfinance")
+        previous_level = yf_logger.level
+        yf_logger.setLevel(logging.CRITICAL)
+
+        # Download each ticker individually to avoid cross-timezone misalignment (avoid batch download)
+        frames = []
+        try:
+            for ticker in tickers:
+                ticker_start = start
+                data = yf.download(ticker, start=ticker_start, end=end,
+                                interval=interval, auto_adjust=True, progress=False)
+                if not data.empty:
+                    prices = self._extract_close(data, [ticker])
+                    prices = self._normalize_tz(prices)
+                    frames.append(prices)
+        finally:
+            yf_logger.setLevel(previous_level)
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = frames[0]
+        for frame in frames[1:]:
+            result = result.join(frame, how='outer')
+        return result
+
+    def _extract_close(self, raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+        if raw.empty:
+            return pd.DataFrame()
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                # Always use xs regardless of ticker count since yfinance now always returns MultiIndex
+                prices = raw.xs('Close', axis=1, level=0)
+                # xs with level=0 returns a DataFrame with tickers as columns
+                # but for a single ticker it may return a Series so we normalise it
+                if isinstance(prices, pd.Series):
+                    prices = prices.to_frame(name=tickers[0])
+            else:
+                # Fallback for older yfinance or already-processed data
+                prices = raw[['Close']].rename(columns={'Close': tickers[0]})
+            prices.columns = [str(c) for c in prices.columns]  # flatten any tuple labels
+            return prices
+        except KeyError as e:
+            print(f"Could not extract Close prices: {e}. Columns were: {raw.columns.tolist()}")
+            return pd.DataFrame()
+
+    def _merge(self, new: pd.DataFrame, existing: pd.DataFrame) -> pd.DataFrame:
+        """Merge two price DataFrames, removing duplicates and sorting by index."""
+        if existing.empty:
+            return new
+        if new.empty:
+            return existing
+        merged = pd.concat([existing, new]).sort_index()
+        merged = merged.ffill().groupby(level=0).last()   # dedup, keep latest value
+        merged = merged.reindex(sorted(merged.columns), axis=1)  # sort columns alphabetically
+        merged.index.name = 'Datetime'
+        return merged
+
+    def _compute_single_ticker(self, ticker: str, ticker_handle, interval: str) -> dict:
+        """Compute all metrics for one ticker. Assumes FX rates and prices are already loaded."""
+        # Initialisation
+        data = {"Ticker": ticker, "Currency": "N/A", "Quote":0.0, "Quote_EUR": 0.0, "P/E": 0.0, "Fwd_P/E": 0.0, 
             "P/B": 0.0, "PEG": 0.0, "Earnings_Growth": 0.0, "Div_Yield": 0.0, "Div_CAGR": 0.0, 
             "Latest_Div_EUR": 0.0, "Months_Paid": [0]*12, "Sector": "N/A", "PayoutRatio": 0.0}
-    
-    try:
+
         print(f"\nProcessing data for {ticker}")
-        # Get info
-        info = ticker_handle.info
-        #print("info:", info)
-        if not info: raise ValueError("No info returned")
-        
-        # Get currency
-        currency = info.get('currency', 'EUR')
-        rate = usd_eur_rate if currency == 'USD' else chf_eur_rate if currency == 'CHF' else 1.0
-        
+        try:
+            info = ticker_handle.info
+            currency = info.get('currency', 'EUR')
+            rate = self._usd_eur if currency == 'USD' else self._chf_eur if currency == 'CHF' else 1.0
+
+            df = self._hist_prices.get(interval, pd.DataFrame())
+            if ticker in df.columns:
+                data["Quote"] = df[ticker].dropna().iloc[-1]
+                data["Quote_EUR"] = float(data["Quote"] * rate)
+
+            self._fill_valuation(data, info, currency, ticker)      # P/E, P/B, PEG etc.
+            self._fill_earnings_growth(data, ticker, ticker_handle)
+            self._fill_dividends(data, ticker_handle, currency)
+
+        except Exception as e:
+            print(f"Error processing {ticker}: {e}")
+
+        return data
+    
+    def _fill_valuation(self, data: dict, info, currency: str, ticker: str) -> dict:
         # Update dictionary with the latest fetch
         data.update({
             "Currency": currency,
@@ -179,31 +355,20 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
             "P/B": round(info['priceToBook'], 2) if isinstance(info.get('priceToBook'), (int, float)) else 0.0
         })
                 
-        #print("Am I here?")
-        
-        # Price calculation from cached hist_prices
-        if ticker in hist_prices.columns:
-            #print("Am I here now?")
-            #print("hist_prices[ticker]: ", hist_prices[ticker])
-            #print("len(hist_prices): ", len(hist_prices))
-            data["Quote"] = hist_prices[ticker].dropna().iloc[-1] # Get original quote
-            data["Quote_EUR"] = float(data["Quote"] * rate) # Get quote in euro (because I'm French :) )
-            #print(f"Last close for {ticker}: {data["Quote"]}")
-            #print(f"rate for {ticker}: {rate}")
-            
-        # Fallback P/E calculation
-        #print("pe: ", data["P/E"])
         
         if data["P/E"] == 0.0:
             eps_ttm = info.get('trailingEps') # If trailingPE is 0.0 (missing), try to calculate it manually using trailingEps
-            #print("eps: ", eps_ttm)
+            print("eps: ", eps_ttm)
             # Use currentPrice from info or fallback to cached quote
             price_native = info.get('currentPrice') or (data["Quote"] if data["Quote"] != 0 else None)
-            #print("price_native: ", price_native)
+            print("price_native: ", price_native)
             if eps_ttm and price_native:
                 data["P/E"] = round(price_native / eps_ttm, 2)
                 print(f"Calculated fallback P/E for {ticker}: {data['P/E']}")
-        
+
+        return data
+    
+    def _fill_earnings_growth(self, data: dict, ticker: str, ticker_handle: yf.Ticker) -> dict:
         # Get income statement for earnings growth 
         try:
             income = ticker_handle.income_stmt
@@ -247,7 +412,13 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
                     data["PEG"] = round(data["P/E"] / (net_growth * 100), 2)
         except Exception:
             print("Couldn't get Income Statement!")
+
+        return data
+
+    def _fill_dividends(self, data: dict, ticker_handle: yf.Ticker, currency: str) -> dict:
         
+        one_year_ago = datetime.today() - timedelta(days=365)
+        n_years_ago = datetime.today() - timedelta(days=self.DIV_CAGR_YEARS * 365)
         # Get dividend data
         actions = ticker_handle.actions
         #print("actions: ", actions)
@@ -266,7 +437,7 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
                 # I focus on euro from here
                 if not ttm_divs.empty and data["Quote_EUR"] != 0.0:
                     #print("ttm not empty")
-                    ttm_sum_eur = ttm_divs.sum() * (usd_eur_rate if currency == 'USD' else chf_eur_rate if currency == 'CHF' else 1)
+                    ttm_sum_eur = ttm_divs.sum() * (self._usd_eur if currency == 'USD' else self._chf_eur if currency == 'CHF' else 1)
                     data["Div_Yield"] = round(ttm_sum_eur / data["Quote_EUR"], 4)
 
                 # Months paid
@@ -279,9 +450,9 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
                 latest_div = divs.iloc[-1]
                 if isinstance(latest_div, (int, float)):
                     if currency == 'USD':
-                        latest_div = latest_div * usd_eur_rate
+                        latest_div = latest_div * self._usd_eur
                     elif currency == 'CHF':
-                        latest_div = latest_div * chf_eur_rate
+                        latest_div = latest_div * self._chf_eur
                     data["Latest_Div_EUR"] = round(latest_div, 4)
                     
                 #print("latest div amount")
@@ -291,416 +462,192 @@ def calculate_ticker_metrics(ticker, ticker_handle, hist_prices, usd_eur_rate, c
                 divs_filtered = divs[divs.index >= n_years_ago]
                 data["Div_CAGR"] = calculate_growth_rate(divs_filtered)
                 #print("data[Div_CAGR]: ", data["Div_CAGR"])
-                
-    except Exception as e:
-        print(f"Error processing {ticker}: {e}")
-    
-    #print("calculate_ticker_metrics out")
-    return data
 
-# To compare the P/B ratio of a stock to the five biggest companies by market cap, I use the benchmark below
-# TODO automate the choice of companies, and add the remaining sectors
-SECTOR_BENCHMARK_MAP = {
-    'Technology': ['AAPL', 'MSFT','NVDA','TSM','AVGO'],
-    'Financial Services': ['JPM', 'BRK-A','MA','BAC','V'],
-    'Industrials': ['GE', 'CAT', 'RTX', 'SIE.DE', 'AIR.PA'],
-    'Utilities': ['NEE', 'IBDSF', 'DOGEF', 'ENLAY', 'CEG'],
-    'Healthcare': ['LLY', 'JNJ', 'AZN', 'UNH', 'ROG.SW'],
-    'Real Estate': ['WELL', 'PLD', 'AMT', 'EQIX', 'SPG'],
-    'Communication Services': ['GOOGL', 'META', 'TCEHY', 'NFLX', 'SFTBY'],
-    'Consumer Cyclical': ['AMZN', 'TSLA', 'LVMUY', 'BABAF', 'HD'],
-}
+        return data
 
-def get_sector_pb_benchmark(sector, cache_dir, required_days: int =7):
-    """
-    Calculates avg P/B for a sector. 
-    Uses existing static_metrics if available to avoid API calls.
-    """
-    #print("get_sector_pb_benchmark called")
-    
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_path = os.path.join(cache_dir, f"last_fetch_date.json")
-    
-    # Initialisation
-    bench_data = {
-        "pb_bench_dates": {},
-        "benchmarks": {}
-    }
-    
-    # Try loading data
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        try:
-            with open(cache_path, 'r') as f:
-                bench_data.update(json.load(f))
-            #print(f"Loaded last P/B benchmark")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"\nP/B cache file corrupted or empty, ignoring: {e}")
-    else:
-        print("\nP/B cache file is 0 bytes, ignoring.")
-        
-    # Check last update per sector
-    last_call_pb_bench_str = bench_data.get("pb_bench_dates", {}).get(sector, "1900-01-01")
-    last_call_pb_bench = datetime.strptime(last_call_pb_bench_str, "%Y-%m-%d").date()
-    #print("last_call_pb_bench_str: ", last_call_pb_bench_str)
-    #print("last_call_pb_bench: ", last_call_pb_bench)
-    
-    is_stale    = date.today() - last_call_pb_bench > timedelta(required_days)
-    is_missing  = sector not in bench_data["benchmarks"]
-    
-    #print("date.today() - last_call_pb_bench: ", date.today() - last_call_pb_bench)
-    #print("timedelta(required_days): ",  timedelta(required_days))
-    #print("is_missing: ", is_missing)
-    
-    if is_stale or is_missing:
+    def _get_sector_benchmark(self, sector: str) -> float:
+        """Returns avg P/B for sector proxy tickers. Refreshes every BENCHMARK_REFRESH_DAYS."""
+        # Dedicated file — no longer sharing with FX cache
+        bench_path = os.path.join(self.cache_dir, "sector_benchmarks.json")
+        bench_data = self._load_json(bench_path, default={"dates": {}, "values": {}})
+
+        last_str = bench_data["dates"].get(sector, "1900-01-01")
+        last_date = datetime.strptime(last_str, "%Y-%m-%d").date()
+        is_stale = (date.today() - last_date) > timedelta(days=self.BENCHMARK_REFRESH_DAYS)
+        is_missing = sector not in bench_data["values"]
+
         if is_stale:
-            print(f"\n{required_days} days passed. Updating P/B benchmark for {sector}...")
-            
-        if is_missing:
+            print(f"\n{self.BENCHMARK_REFRESH_DAYS} days passed. Updating P/B benchmark for {sector}...")
+        elif is_missing:
             print(f"\nSector {sector} is missing. Updating its P/B benchmark")
-        
-        proxies = SECTOR_BENCHMARK_MAP.get(sector, [])
-        print("proxies: ", proxies)
+
+        if not (is_stale or is_missing):
+            return bench_data["values"].get(sector, 0.0)
+
+        proxies = SECTOR_BENCHMARK_MAP.get(sector)
         if not proxies:
             return 0.0
 
-        # Fetch only the proxies we need, and only the 'info' part
-        proxy_objs = yf.Tickers(" ".join(proxies))
-        #print("proxy_objs: ", proxy_objs)
         pb_values = []
-        
-        for p in proxies:
+        for p in yf.Tickers(" ".join(proxies)).tickers.values():
             try:
-                p_info = proxy_objs.tickers[p].info
-                pb = p_info.get("priceToBook")
-                #print("pb: ", pb)
+                pb = p.info.get("priceToBook")
                 if isinstance(pb, (int, float)):
                     pb_values.append(pb)
-            except: continue
-            
+            except Exception:
+                continue
+
         result = round(sum(pb_values) / len(pb_values), 2) if pb_values else 0.0
         print("result: ", result)
-        
-        # Update the dict if new value
-        if "pb_bench_dates" not in bench_data:
-            bench_data["pb_bench_dates"] = {}
-        if "benchmarks" not in bench_data:
-            bench_data["benchmarks"] = {}
-            
-        if bench_data["benchmarks"].get(sector) != result or is_stale:
-            bench_data["benchmarks"][sector] = result
-            bench_data["pb_bench_dates"][sector] = date.today().isoformat()
-        
-            with open(cache_path, 'w') as f:
-                json.dump(bench_data, f, indent=4)
-                 
-        #print("bench_data[pb_bench_dates][sector]: ", bench_data["pb_bench_dates"][sector])
-        
+
+        bench_data["values"][sector] = result
+        bench_data["dates"][sector] = date.today().isoformat()
+        self._save_json(bench_path, bench_data)
+
         return result
-            
-    #print("get_sector_pb_benchmark out")
-    return bench_data["benchmarks"].get(sector, 0.0)
-    
-def fetch_latest_metrics(tickers_list, category_name='assets', test=False, required_days=1, interval="1d", force_update=False, target_start_date=None):
-    """
-    Fetches the latest data and valuation metrics for a list of tickers using yfinance.
-    """
-    print("fetch_latest_metrics called")
-    if not tickers_list:
-        return []
-        
-    # Handle price caching
-    if test==False:
-        cache_dir = current_app.config['DATA_FOLDER']
-    else:
-        cache_dir = current_app.config['TEST_FOLDER']
-    #print("cache_dir: ", cache_dir)
-    os.makedirs(cache_dir, exist_ok=True)
-    price_cache_path    = os.path.join(cache_dir, f"{category_name}_price_history_{interval}.csv") # Interval is 4h for intraday monitoring portfolio, 1d for backtesting
-    info_cache_path     = os.path.join(cache_dir, f"{category_name}_metrics_static.json")
-    
-    if target_start_date:
-        force_update=True
-        
-    # Load metrics
-    static_metrics = {}
-    if os.path.exists(info_cache_path) and os.path.getsize(info_cache_path) > 0:
-        try:
-            with open(info_cache_path, 'r') as f:
-                static_metrics.update(json.load(f))
-            print(f"\nLoaded static metrics from cache: {info_cache_path}")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"\nCache file corrupted or empty, ignoring: {e}")
-            static_metrics = {} # Reset to empty if file is bad
-    else:
-        print("\nMetrics cache file is 0 bytes, ignoring.")
-        
-    # If we have a cache and there's no forced update, return now.
-    if not force_update and static_metrics:
-        # Ensure all requested tickers are in the cache before returning
-        if all(t in static_metrics for t in tickers_list):
-            print(f"Returning cached {category_name} data immediately.")
-            return [static_metrics[t] for t in tickers_list]
-    
-    # Fetch exchange rates
-    usd_eur_rate, chf_eur_rate = fetch_exchange_rates(cache_dir)
-        
-    # Load price data
-    hist_prices = pd.DataFrame()
-    first_datetime = None
-    last_datetime = None
-    
-    if os.path.exists(price_cache_path):
-        hist_prices = pd.read_csv(price_cache_path, index_col=0, parse_dates=True)
-        hist_prices.index.name = 'Datetime'
-        #print("hist_prices: ", hist_prices.tail(5))
-        if not hist_prices.empty:
-            # Determine the existing range of cached data
-            first_datetime = hist_prices.index[0].tz_localize(None)
-            last_datetime = hist_prices.index[-1]
-            print("Last update time from price history: ", last_datetime)
-    else:
-        print("No historical prices. Fetching new prices.")
-        last_datetime = datetime.now()-timedelta(days=3) # Set to 3 arbitrarily. Creates a file
-        #print("last_datetime: ", last_datetime)
-        
-    # Determine the timezone of the existing data (if any)
-    current_tz = None
-    if isinstance(hist_prices.index, pd.DatetimeIndex):
-        current_tz = hist_prices.index.tz
-        print("current_tz: ", current_tz)
-    
-    # Check if historical prices are needed
-    if target_start_date:
-        target_ts = pd.to_datetime(target_start_date).tz_localize(None)
-        #print("target_ts: ", target_ts)
-   
-        # Ensure timezones match
-        if current_tz:
-            print("Yes current tz")
-            target_ts = target_ts.tz_localize(current_tz)
-            now = pd.Timestamp.now(tz=current_tz)
-            #print("target_ts2: ", target_ts)
-            if first_datetime:
-                first_datetime = first_datetime.tz_localize(current_tz)
-        else:
-            print("No current tz")
-            target_ts = target_ts.tz_localize('UTC')
-            now = pd.Timestamp.now(tz='UTC')
-            #print("target_ts2: ", target_ts)
-            if first_datetime:
-                first_datetime = first_datetime.tz_localize('UTC')
-            
-        print("target_ts: ", target_ts)
-        print("first_datetime: ", first_datetime)
-        print("now: ", now)
-        
-        # If the target date is earlier than the cached date, fill the gap
-        if first_datetime is None or target_ts < first_datetime:
-            print(f"Backfilling history from {target_ts} to {first_datetime or now}")
-            
-            # Download the older data
-            # end_date is the start of the current data to avoid overlapping the whole set
-            backfill_end = first_datetime if first_datetime else now
-            #print("backfill_end: ", backfill_end)
-            
-            historical_gap = yf.download(tickers_list, start=target_ts, end=backfill_end, 
-                                         interval=interval, group_by='ticker', auto_adjust=True, progress=False)
-            
-            #print("historical_gap: ", historical_gap.head(5))
-            if not historical_gap.empty:
-                # Process Close prices
-                if len(tickers_list) == 1:
-                    new_old_prices = historical_gap[['Close']].rename(columns={'Close': tickers_list[0]})
-                else:
-                    new_old_prices = historical_gap.xs('Close', axis=1, level=1)
-                
-                #print("new_old_prices: ", new_old_prices.head(5))
-                # Combine old history and existing history
-                hist_prices = pd.concat([new_old_prices, hist_prices]).sort_index()
-                hist_prices = hist_prices.ffill().groupby(level=0).last()
-                hist_prices = hist_prices[~hist_prices.index.duplicated(keep='first')]
-                # Remove overlaps and keep latest
-                hist_prices = hist_prices.groupby(level=0).last()
-                hist_prices = hist_prices.reindex(sorted(hist_prices.columns), axis=1)
-                hist_prices = hist_prices.dropna()
-                hist_prices.index.name = 'Datetime'
-                #print("hist_prices: ", hist_prices.head(5))
-                # Save to CSV
-                hist_prices.to_csv(price_cache_path, index=True)
-                print("Historical gap closed.")
-        
-    # Determine last local update time
-    last_modified = 0
-    if os.path.exists(price_cache_path):
-        last_modified = os.path.getmtime(price_cache_path)
-        last_update_time = datetime.fromtimestamp(last_modified)
-        #print("Last local update time: ", last_update_time)
-    else:
-        last_update_time = datetime(1900, 1, 1)
-        
-    #last_update_time = datetime(1900, 1, 1) # Use that to debug
-        
 
-    # Determine if we need an update
-    needs_price_download = False
-    if interval=="1d":
-        diff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - last_update_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        #print("diff: ", diff)
-        needs_price_download = diff > timedelta(days=1)
-    else:
-        needs_price_download = datetime.now() - last_update_time > timedelta(hours=4)
-    #needs_price_download, download_start = check_price_cache_status(hist_prices, tickers_list, required_days) #TODO remove?
-           
-    # Check if a ticker is new and force download
-    new_ticker = [t for t in tickers_list if t not in hist_prices.columns]
-    if new_ticker:
-        ticker_to_add = new_ticker[0]
-        print(f"New ticker: {ticker_to_add}, start download.")
-        download_start = hist_prices.index.min() # Use existing history as boundary
-        new_ticker_data = yf.download(  ticker_to_add, 
-                                        start= download_start,
-                                        interval=interval, # TODO replace by correct interval
-                                        auto_adjust=True)
-                                        
-        if not new_ticker_data.empty:
-            new_price = new_ticker_data.xs('Close', axis=1, level=0)
-            hist_prices = hist_prices.join(new_price, how='outer')
-            hist_prices = hist_prices.reindex(sorted(hist_prices.columns), axis=1)
-            hist_prices.index.name = 'Datetime'
-            hist_prices.to_csv(price_cache_path, index=True)
-            print(f"Added {ticker_to_add} to history.")
+    def _current_period_start(self, interval: str) -> datetime:
+        """Returns the start of the current incomplete candle in naive UTC."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        threshold = self.STALE_THRESHOLD.get(interval)
+        if threshold is None:
+            raise ValueError(f"Unknown interval '{interval}'")
+        
+        # Floor now to the nearest interval
+        total_seconds = int(threshold.total_seconds())
+        epoch = datetime(1970, 1, 1)
+        seconds_since_epoch = int((now - epoch).total_seconds())
+        floored_seconds = (seconds_since_epoch // total_seconds) * total_seconds
+        return epoch + timedelta(seconds=floored_seconds)
 
-    # Don't download stocks prices if not a business day
-    is_business_day = BDay().is_on_offset(datetime.now())
-    print("is_business_day: ", is_business_day)
+    def _is_stale(self, df: pd.DataFrame, interval: str) -> bool:
+        if df.empty:
+            return True
+        
+        threshold = self.STALE_THRESHOLD.get(interval)
+        if threshold is None:
+            raise ValueError(f"Unknown interval '{interval}'")
     
-    if (not is_business_day and category_name=='stocks' and not new_ticker):
-        needs_price_download = False
-    
-        
-    print("needs_price_download: ", needs_price_download)
-    #print("download_start: ", download_start)
-    
-    if needs_price_download: 
-        print(f"Cache older than {interval}. Updating market data...")
-        
-        new_data = yf.download(tickers_list, start=last_datetime, end=datetime.now(), interval=interval, group_by='ticker', auto_adjust=True, progress=False)
-        #print("new_data: ", new_data.tail(5))
-        
-        
-        if not new_data.empty:
-            if len(tickers_list) == 1:
-                new_prices = new_data[['Close']].rename(columns={'Close': tickers_list[0]})
-            else:
-                # Extract only 'Close' columns and simplify headers
-                new_prices = new_data.xs('Close', axis=1, level=1)
-                
-            # Combine old and new, remove duplicates, and sort
-            hist_prices = pd.concat([hist_prices, new_prices]).sort_index()
-            #print(hist_prices.head(5))
-            #print(hist_prices.tail(5))
-            hist_prices = hist_prices.ffill().groupby(level=0).last()
-            #print(hist_prices.head(5))
-            #print(hist_prices.tail(5))
-            #hist_prices = hist_prices[~hist_prices.index.duplicated(keep='last')]
-            hist_prices = hist_prices.reindex(sorted(hist_prices.columns), axis=1)
-            #print(hist_prices.head(5))
-            #print(hist_prices.tail(5))
-            hist_prices.index.name = 'Datetime'
-            hist_prices.to_csv(price_cache_path, index=True)
-            print(f"Price cache updated. hist_prices now has columns: {hist_prices.columns.tolist()}")
-                                    
-    # Process ticker metrics
-    tickers_obj = yf.Tickers(" ".join(tickers_list))
-    needs_info_update = False
-    
-    #print("I'm here")
-    
-    for ticker in tickers_list:
-        # Check if we already processed this ticker today in the JSON cache
-        #print("Got here")   
-        if ticker not in static_metrics or needs_price_download: 
-            needs_info_update = True # If not cached, fetch it
-            static_metrics[ticker] = calculate_ticker_metrics(ticker, tickers_obj.tickers[ticker], hist_prices, usd_eur_rate, chf_eur_rate)
-            #print(f"static_metrics[{ticker}]: ", static_metrics[ticker])
-           
-        # Sector benchmark
-        sector = static_metrics[ticker].get("Sector")
-        #print("ticker: ", ticker)
-        #print("sector: ", sector)
-        if sector:
-            benchmark_pb = get_sector_pb_benchmark(sector, cache_dir)
-            static_metrics[ticker]["Sector_PB_Benchmark"] = benchmark_pb
-            #print(f"static_metrics[{ticker}][Sector_PB_Benchmark]: ", static_metrics[ticker]["Sector_PB_Benchmark"])
-                
-        
-    # Save if we added new data
-    if needs_info_update:
-        try:
-            with open(info_cache_path, 'w') as f:
-                json.dump(static_metrics, f, indent=4)
-            print(f"Static metrics updated in cache: {info_cache_path}")
-        except Exception as e:
-            print(f"Could not save cache: {e}")
-            
-    #print("fetch_latest_metrics out")
-    return [static_metrics[t] for t in tickers_list]
-        
+        normalized = self._normalize_tz(df)
+        last = normalized.index.max()
+        next_candle = last + 2*threshold # 2 because of the open/close difference between two candles
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
-def remove_from_price_history(ticker, interval, category_name='assets'):
-    #print("remove_from_price_history called")
-    
-    cache_dir = current_app.config['DATA_FOLDER']
-    os.makedirs(cache_dir, exist_ok=True)
-    price_cache_path = os.path.join(cache_dir, f"{category_name}_price_history_{interval}.csv") #TODO replace 4h by interval
-    try:
-        df = pd.read_csv(price_cache_path, index_col=0)
+        is_stale = next_candle < now_utc
+        #print(f"[STALE] last candle close={last}+{interval}, next candle start={next_candle}, now_utc={now_utc}, stale={is_stale}")
+        if not is_stale:
+            self._weekend_sync_done = False # Reset when data is fresh
+            return False
+        if self.category == 'stocks' and not BDay().is_on_offset(datetime.now()):
+            if self._weekend_sync_done:
+                return False  # Already synced once this weekend
+            self._weekend_sync_done = True
+            return True  # Allow one download
+        return True
+
+    ### I/O
+
+    def _drop_from_csv(self, ticker: str, interval: str) -> None:
+        path = self._get_price_path(interval)
+        if not path:
+            print(f"Unknown interval '{interval}'")
+            return
+        df = self._load_csv(path)
         if ticker in df.columns:
-            df.drop(columns=[ticker], inplace=True)
-            df.to_csv(price_cache_path)
-            print(f"\n{ticker} removed from price history")
-    except FileNotFoundError:
-        print(f"\nPrice history file not found.")
-        
-    #print("remove_from_price_history out")
-        
-def remove_from_metrics(ticker, category_name='assets'):
-    #print("remove_from_metrics called")
+            df = df.drop(columns=[ticker])
+            self._save_csv(df, interval)
+            # Also evict from memory cache
+            if interval in self._hist_prices:
+                self._hist_prices[interval] = df
+            print(f"{ticker} removed from price history ({interval})")
+
+    def _drop_from_json(self, ticker: str) -> None:
+        self._static_metrics = self._load_json(self._metrics_path, default={})
+        if ticker in self._static_metrics:
+            del self._static_metrics[ticker]
+            self._save_json(self._metrics_path, self._static_metrics)
+            print(f"{ticker} removed from metrics")
+
+    def _load_csv(self, path) -> pd.DataFrame:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                return pd.read_csv(path, index_col="Datetime", parse_dates=True).dropna()
+            except Exception as e:
+                print(f"Could not read {path}: {e}")
+        return pd.DataFrame()
+
+    def _save_csv(self, df: pd.DataFrame, interval: str):
+        path = self._get_price_path(interval)
+        df.index.name = "Datetime"
+        df.to_csv(path, index=True)
+
+    def _load_json(self, path: str, default: dict) -> dict:
+        """Load a JSON file from disk. Returns default if missing, empty, or corrupt."""
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Could not read {path}: {e}")
+        return default
+
+    def _save_json(self, path: str, data: dict) -> None:
+        """Save a dict to a JSON file. Silently logs on failure."""
+        try:
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=4)
+        except IOError as e:
+            print(f"Could not write {path}: {e}")
+
+
+###
+def calculate_growth_rate(divs_filtered):
+    """Calculates dividend growth rate (CAGR) using log-linear regression."""
+    #print("calculate_growth_rate called")
     
-    cache_dir = current_app.config['DATA_FOLDER']
-    os.makedirs(cache_dir, exist_ok=True)
-    info_cache_path = os.path.join(cache_dir, f"{category_name}_metrics_static.json")
-    try:
-        with open(info_cache_path, 'r') as f:
-            metrics = json.load(f)
+    yearly_divs = divs_filtered.groupby(divs_filtered.index.year).sum()
+    yearly_divs = yearly_divs[yearly_divs > 0] # Filter for log calculation
+            
+    growth_rate = "N/A"
+    if len(yearly_divs) >= 2:
+        #print("yearly_divs.index: ", yearly_divs.index)
+        # x-values (years from the start)
+        x = yearly_divs.index - yearly_divs.index[0]
+        #print("x: ", x)
         
-        if ticker in metrics:
-            del metrics[ticker]
-            with open(info_cache_path, 'w') as f:
-                json.dump(metrics, f, indent=4)
-            print(f"\n{ticker} removed from metrics")
-    except FileNotFoundError:
-        print("\nMetrics file not found.")
+        # y-values (natural log of dividends)
+        #print("yearly_divs.values: ", yearly_divs.values)
+        y = np.log(yearly_divs.values)
+        #print("y: ", y)
+                
+        # Log-linear regression: slope is compounded growth rate
+        #slope, intercept, rvalue, _, _ = linregress(x, y) # Uncomment to visualise regression
+        slope, _, _, _, _ = linregress(x, y)
+        #print("slope: ", slope)
+        #print(f"R-squared: {rvalue**2:.6f}")
         
-    #print("remove_from_metrics out")
+        # Uncomment to visualise regression
+#        plt.plot(x, y, 'o', label='original data')
+#        plt.plot(x, intercept + slope*x, 'r', label='fitted line')
+#        plt.legend()
+#        plt.show()
+        
+        growth_rate = np.exp(slope) - 1
+        growth_rate = round(growth_rate, 4)
+        #print("growth_rate: ", growth_rate)
+            
+    #print("calculate_growth_rate out")
+    
+    return growth_rate
+
         
 if __name__ == '__main__':
     # This block is for testing the data fetching function independently
-#    TICKERS = [
-#        "AMAT", "AMT", "AMUN.PA", "ASML.AS", "BMO", "BMW.DE", "BNP.PA",
-#        "COFB.BR", "CS.PA", "DSY.PA", "ES", "ISP.MI", "LRCX", "MAN", "MBG.DE",
-#        "MSI", "NN.AS", "NOVN.SW", "NVDA", "OMC", "PIA.MI", "PLD", "PUB.PA", "QBTS", "S4VC.F", "SAN.PA", "SLF", "TRN.MI", "TT"
-#    ]
     TICKERS = [
             "SAN.PA", "TT"
         ]
-    #benchmark_tickers = []
-    #for ticker_list in SECTOR_BENCHMARK_MAP.values():
-    #    benchmark_tickers.extend(ticker_list)
-        
-    #all_tickers = sorted(list(set(TICKERS + benchmark_tickers)))
-    #print("all_tickers: ", all_tickers)
-    
-    metrics = fetch_latest_metrics(TICKERS, category_name='stocks', cache_dir='test', required_days=1, interval="4h", force_update=True)
-    for i in range(len(TICKERS)):
-        print(metrics[i])
+    manager = FinanceDataManager(cache_dir='test', category_name='stocks')
+    metrics = manager.get_metrics(TICKERS, interval="15m", force=True)
+    for m in metrics:
+        print(m)

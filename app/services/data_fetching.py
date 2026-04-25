@@ -1,52 +1,36 @@
-import os
 import pandas as pd
+from app.utils.finance_data import FinanceDataManager
 
 class PortfolioDataManager:
-    def __init__(self, current_app, finance_data, storage_utils):
-        self.cache_dir = current_app.config['DATA_FOLDER']
-        self.finance_data = finance_data
-        self.storage_utils = storage_utils
-        
-        self.path_1d = os.path.join(self.cache_dir, 'stocks_price_history_1d.csv')
-        self.path_4h = os.path.join(self.cache_dir, 'stocks_price_history_4h.csv')
+    def __init__(self, finance: FinanceDataManager):
+        self.finance = finance
 
-    def get_data(self, asset_type='stocks'):
-        data_4h = self._load_csv(self.path_4h)
-        data_1d = self._load_csv(self.path_1d)
+    def get_live_tickers(self) -> list[str]:
+        """Single source of truth for which tickers are in the live portfolio."""
+        interval = self.finance.config.get("live_interval")
+        path = self.finance._get_price_path(interval)
+        df = self.finance._load_csv(path)
+        if not df.empty:
+            return list(df.columns)
+        # Fallback — read tickers from metrics JSON
+        metrics = self.finance._load_json(self.finance._metrics_path, default={})
+        return list(metrics.keys())
 
-        tickers_4h = set(data_4h.columns) if data_4h is not None else set()
-        tickers_1d = set(data_1d.columns) if data_1d is not None else set()
+    def get_live_data(self) -> pd.DataFrame:
+        tickers = self.get_live_tickers()
+        interval = self.finance.config.get("live_interval")
+        return self.finance._ensure_prices(tickers, interval, force=False)
 
-        # Integrity check
-        if not tickers_4h.issubset(tickers_1d):
-            print(f"Syncing {asset_type} 1d columns with 4h columns.")
-            download_start = data_4h.index.min()
-            self.finance_data.fetch_latest_metrics(  list(tickers_4h),
-                                            category_name=asset_type,
-                                            interval='1d',
-                                            target_start_date=download_start) # Use daily prices here!
-            data_1d = self._load_csv(self.path_1d)
+class ResearchDataManager:
+    def __init__(self, finance_managers: dict, config):
+        self.finance_managers = finance_managers
+        self.config = config
+        # Mirror from live portfolio using stocks manager
+        self._portfolio_dm = PortfolioDataManager(finance_managers['stocks'])
 
-        # Recency check
-        if data_1d is not None and data_4h is not None:
-            last_1d = data_1d.index.max().normalize()
-            last_4h = data_4h.index.max().tz_localize(None).normalize()
-
-            if last_4h > last_1d:
-                print(f"Updating 1d data from {last_1d}")
-                self.finance_data.fetch_latest_metrics(  list(tickers_1d),
-                                            category_name='stocks',
-                                            interval='1d',
-                                            force_update=True,
-                                            target_start_date=last_1d) # Use daily prices here!
-                data_1d = self._load_csv(self.path_1d)
-
-        return data_1d
-
-    def _load_csv(self, path):
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            try:
-                return pd.read_csv(path, index_col='Datetime', parse_dates=True).dropna()
-            except Exception as e:
-                print(f"Error reading {path}: {e}")
-        return None
+    def get_data(self, asset_type: str = 'stocks') -> pd.DataFrame:
+        tickers = self._portfolio_dm.get_live_tickers()
+        interval = self.config.get("research_interval")
+        finance = self.finance_managers[asset_type]
+        finance._ensure_prices(tickers, interval, force=False)
+        return finance._hist_prices.get(interval, pd.DataFrame())

@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from app.utils import storage_utils
+from app.utils.time_debug import timed
+
 
 # class Metric:
 #     def __init__(self, id, label, type="finance",
@@ -475,17 +477,18 @@ class PortfolioManager:
         return "\n".join(lines)
     
     @classmethod
-    def from_storage(cls, asset_classes, storage_utils, finance_data, interval='1d', force_update=False):
+    @timed
+    def from_storage(cls, asset_classes, storage_utils, finance_managers, interval='1d', force_update=False):
         # Build a PortfolioManager
         portfolios = {}
         
         for asset_type in asset_classes:
             # Get the list of tickers
             tickers = storage_utils.get_assets(asset_type) 
-            
+            manager = finance_managers[asset_type]
             # Fetch metrics
-            raw_metrics = finance_data.fetch_latest_metrics(
-                tickers, asset_type, interval=interval, force_update=force_update
+            raw_metrics = manager.get_metrics(
+                tickers, interval=interval, force=force_update
             )
             
             # Load user-specific data
@@ -508,6 +511,50 @@ class PortfolioManager:
             
             portfolios[asset_type] = Portfolio(assets)
             
+        free_cash = storage_utils.load_cash()
+        return cls(portfolios, free_cash=free_cash)
+    
+    @classmethod
+    def from_cache(cls, asset_classes, storage_utils, finance_managers):
+        """
+        Rebuild portfolio from already-cached metrics. 
+        No network calls, no staleness checks — pure math.
+        """
+        portfolios = {}
+        for asset_type in asset_classes:
+            tickers = storage_utils.get_assets(asset_type)
+            #print(f"[DEBUG] {asset_type} tickers: {tickers}")
+            manager = finance_managers[asset_type]
+            #print(f"[DEBUG] manager category: {manager.category}")
+            
+            # Read directly from in-memory cache, fall back to disk JSON
+            if not manager._static_metrics:
+                manager._static_metrics = manager._load_json(
+                    manager._metrics_path, default={}
+                )
+            
+            raw_metrics = [
+                manager._static_metrics[t] 
+                for t in tickers 
+                if t in manager._static_metrics
+            ]
+            
+            data = PortfolioLoader.load_asset_data(asset_type)
+            assets = [
+                Asset(
+                    ticker=t,
+                    metrics=next(m for m in raw_metrics if m['Ticker'] == t),
+                    asset_type=asset_type,
+                    shares=data['shares'].get(t, 0),
+                    price=data['price'].get(t, 0),
+                    env=data['env'].get(t, 0),
+                    soc=data['soc'].get(t, 0),
+                    gov=data['gov'].get(t, 0),
+                    cont=data['cont'].get(t, 0)
+                ) for t in tickers if t in manager._static_metrics
+            ]
+            portfolios[asset_type] = Portfolio(assets)
+
         free_cash = storage_utils.load_cash()
         return cls(portfolios, free_cash=free_cash)
 

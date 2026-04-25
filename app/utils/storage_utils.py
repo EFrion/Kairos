@@ -1,6 +1,7 @@
 import json
 import os
 from flask import current_app
+import tempfile
 
 # Base directory for all data files
 def get_data_dir():
@@ -50,13 +51,20 @@ def load_data(asset_type, data_kind):
 
 def save_data(data, asset_type, data_kind):
     """Saves a dictionary to the asset-specific JSON file."""
-    print(f"save_data called for {asset_type} of {data_kind}")
+    print(f"save_data called for {asset_type} / {data_kind}")
     filename = get_filename(asset_type, data_kind)
+    dir_name = os.path.dirname(filename)
     try:
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=4)
+        # Write to a temp file in the same directory, then atomically replace
+        with tempfile.NamedTemporaryFile('w', dir=dir_name, 
+                                         delete=False, suffix='.tmp') as tmp:
+            json.dump(data, tmp, indent=4)
+            tmp_path = tmp.name
+        os.replace(tmp_path, filename)
     except Exception as e:
         print(f"Error saving data to file {filename}: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)  # clean up temp file on failure
     print("save_data out")
         
 # Convenience functions

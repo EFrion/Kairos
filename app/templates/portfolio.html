@@ -11,8 +11,8 @@
     
     <div class="nav">
         <a href="/cashflow">Cash Flow</a>
-        <a href="/portfolio">Portfolio Metrics</a>
-        <a href="/test">Optimisation & Backtesting</a>
+        <a href="/portfolio">Portfolio</a>
+        <a href="/research">Research</a>
         
         <div style="float: right; margin-right: 20px; position: relative;">
             <button type="button" id="bellBtn">
@@ -240,10 +240,12 @@
                 const assetType = section ? section.id.split('-')[0] : 'stocks';
 
                 // Persistent save
-                saveSingleValue(input, ticker, input.value); 
-                
-                // Server sync (full recalculation)
-                updatePortfolioUI(assetType, ticker);
+                saveSingleValue(input, ticker, input.value)
+                    .then(data => {
+                        if (data.portfolio) {
+                            PortfolioUI.update(data, assetType, ticker);
+                        }
+                    });
             },
             
             setupListeners() {
@@ -542,28 +544,21 @@
             // Determine the asset type by looking at the parent container
             const assetType = inputElement.closest('[id$="-section"]').id.split('-')[0]; // Return 'stocks' or 'crypto'
     
-            // Create a payload that only contains the ticker and the single updated field
-            const dataToSend = {
-                ticker: ticker,
-                field: fieldType, // 'shares' or 'price'
-                value: parseFloat(value) || 0.0,
-                asset_type: assetType
-            };
-
-            fetch(`/save_single_value/${assetType}`, {
+            return fetch(`/save_single_value/${assetType}`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(dataToSend)
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ticker: ticker,
+                    field: fieldType,
+                    value: parseFloat(value) || 0.0,
+                    asset_type: assetType
+                })
             })
             .then(response => response.json())
-            .then(data => {
-                if (data.status !== 'success') {
-                    console.error('Failed to save value:', data.message);
-                }
-            })
-            .catch(error => console.error('Error saving value:', error));
+            .catch(error => {
+                console.error('Error saving value:', error);
+                return { status: 'error' };
+            });
         }
                 
         function currencyFormat(value, currencyCode = 'EUR') {
@@ -700,6 +695,7 @@
             selector: document.getElementById('category-selector'),
             label: document.getElementById('category-label'),
             input: document.getElementById('ticker'),
+            submitBtn: document.getElementById('submit-button'),
 
             init() {
                 this.setupListeners();
@@ -726,7 +722,12 @@
                     };
                 });
 
-                // Delete buttons
+                // Add ticker
+                if (this.form) {
+                    this.form.addEventListener('submit', (e) => this.handleAdd(e));
+                }
+
+                // Delete ticker
                 document.addEventListener('click', (e) => {
                     const deleteBtn = e.target.closest('.delete-btn');
                     if (deleteBtn) {
@@ -765,6 +766,29 @@
                 this.form.reset();
             },
 
+            async handleAdd(e) {
+                e.preventDefault();
+                this.submitBtn.textContent = 'Adding...';
+                this.submitBtn.disabled = true;
+
+                try {
+                    const response = await fetch(this.form.action, {
+                        method: 'POST',
+                        body: new FormData(this.form)
+                    });
+                    if (response.ok) {
+                        window.location.reload();
+                    } else {
+                        alert('Failed to add ticker.');
+                        this._resetSubmitBtn();
+                    }
+                } catch (err) {
+                    console.error('Add ticker failed:', err);
+                    this._resetSubmitBtn();
+                }
+            },
+
+
             // Action logic
             async handleDelete(btn) {
                 const tickerId = btn.getAttribute('data-id');
@@ -782,13 +806,18 @@
                     const data = await response.json();
 
                     if (data.status === 'success') {
+                        // Remove the row visually
                         const row = document.getElementById(`row-${tickerId}`);
                         if (row) {
                             row.classList.add('row-fade-out');
                             setTimeout(() => {
                                 row.remove();
-                                location.reload(); // Reload to update global totals
                             }, 400);
+                        }
+
+                        // Update totals and charts from response
+                        if (data.portfolio) {
+                            PortfolioUI.update(data, assetType);
                         }
                     } else {
                         alert('Error: ' + data.message);
@@ -797,6 +826,57 @@
                     console.error('Delete failed:', error);
                     alert('Could not delete ticker.');
                 }
+            },
+
+            _resetSubmitBtn() {
+                this.submitBtn.textContent = 'Save Asset';
+                this.submitBtn.disabled = false;
+            }
+        };
+
+        const SyncManager = {
+            intervalId: null,
+            timeoutId: null,
+
+            init(intervalMs) {
+                // Calculate ms until next period boundary
+                const now = Date.now();
+                const msUntilNext = intervalMs - (now % intervalMs);
+                
+                // Fire at page load
+                this.sync();
+
+                console.log(`SyncManager: next sync in ${Math.round(msUntilNext / 1000)}s`);
+
+                // Fire once at the boundary, then every interval after that
+                this.timeoutId = setTimeout(() => {
+                    this.sync();
+                    this.intervalId = setInterval(() => this.sync(), intervalMs);
+                }, msUntilNext);
+            },
+
+            stop() {
+                if (this.timeoutId) clearTimeout(this.timeoutId);
+                if (this.intervalId) clearInterval(this.intervalId);
+                this.timeoutId = null;
+                this.intervalId = null;
+            },
+
+            sync() {
+                console.log("SyncManager: syncing at", new Date().toLocaleTimeString());
+                fetch('/update_portfolio_cache', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                })
+                .then(res => {
+                    if (!res.ok) return res.text().then(text => { throw new Error(text) });
+                    return res.json();
+                })
+                .then(data => {
+                    console.log("SyncManager: sync complete.");
+                    PortfolioUI.update(data, 'stocks');
+                })
+                .catch(err => console.error("SyncManager: sync failed:", err));
             }
         };
 
@@ -808,36 +888,15 @@
             PortfolioUI.init();
             NotificationManager.init();
             TickerManager.init();
+            SyncManager.init({{ live_interval_ms }});
 
             if (window.INITIAL_PORTFOLIO_DATA) {
                 PortfolioUI.update(window.INITIAL_PORTFOLIO_DATA, 'stocks');
             }
-            console.log("Page loaded with cache. Starting background update...");
     
             const assetsData = collectTableData('stocks');
-            console.log("assetsData: ", assetsData);
-    
-            // Update metrics and price history if needed
-            fetch('/update_portfolio_cache', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ assets: assetsData })
-            })
-            .then(res => {
-                if (!res.ok) {
-                    return res.text().then(text => { throw new Error(text) });
-                }
-                return res.json();
-            })
-            .then(data => {
-                console.log("Background sync complete.");
-                
-                PortfolioUI.update(data, 'stocks');
-            })
-            .catch(err => console.error("Cache sync failed:", err));
-        
-            console.log("Portfolio UI update complete.");
-            
+            console.log("assetsData: ", assetsData);            
+
             const freeCashInput = document.getElementById('free-cash-input');
 
             if (freeCashInput) {

@@ -1,33 +1,38 @@
 from flask import Blueprint, render_template, request, session, redirect, url_for, jsonify, current_app
 import json
 import os
-from app.utils import plotting_utils, storage_utils, finance_data
+from app.utils import plotting_utils, storage_utils
 from app.models import PortfolioManager
+from app.utils.time_debug import timed
 
 bp = Blueprint('portfolio', __name__)
 
 @bp.route('/portfolio', methods=['GET', 'POST'])
-@bp.route('/', methods=['GET', 'POST'])   
+@bp.route('/', methods=['GET', 'POST'])
+@timed
 def portfolio_feature():
-    
-    data = get_portfolio_data()
-    #print("Weight: ", data['portfolio'].stocks.assets[0].weight)
+    app_config = current_app.config['APP_CONFIG']
+    data = get_portfolio_data_from_cache()
     
     return render_template(
         'portfolio.html',
         title='Portfolio Dashboard',
         portfolio=data['portfolio'],
-        income_plot=data['income_plot'].to_html(full_html=False, include_plotlyjs='cdn')
+        income_plot=data['income_plot'].to_html(full_html=False, include_plotlyjs='cdn'),
+        live_interval_ms=_interval_to_ms(app_config.get("live_interval"))
     )
-    
+
+@timed
 def get_portfolio_data(force_update=False):
+    interval = current_app.config['APP_CONFIG'].get("live_interval")
+    finance_managers = current_app.config['FINANCE_MANAGERS']
 
     # TODO automatic asset classes handling
     portfolio = PortfolioManager.from_storage(
         asset_classes=['stocks', 'crypto'],
         storage_utils=storage_utils,
-        finance_data=finance_data,
-        interval='4h',
+        finance_managers=finance_managers,
+        interval=interval,
         force_update=force_update
     )
 
@@ -38,13 +43,23 @@ def get_portfolio_data(force_update=False):
         'income_plot': income_plot
     }
 
-# TODO remove this function
+
+def _interval_to_ms(interval: str) -> int:
+    """Convert interval string to milliseconds for JS polling."""
+    units = {"m": 60, "h": 3600, "d": 86400}
+    try:
+        value = int(interval[:-1])
+        unit = interval[-1]
+        return value * units[unit] * 1000
+    except (ValueError, KeyError):
+        return 15 * 60 * 1000  # fallback: 15 minutes
+
+# TODO remove this function?
 @bp.route('/update_portfolio_cache', methods=['POST'])
+@timed
 def update_portfolio_cache():
-    """
-        Loads cached data when app opens.
-    """                       
-    data = get_portfolio_data(force_update=True)
+    """ Loads cached data when app opens. """                       
+    data = get_portfolio_data()
         
     return jsonify({
         'portfolio': data['portfolio'].to_dict(),
@@ -52,17 +67,27 @@ def update_portfolio_cache():
     })
      
 @bp.route('/update_portfolio_data/<asset_type>', methods=['POST'])
-def update_portfolio_data(asset_type):
-    """
-        Update data when app is running.
-    """
-    data = get_portfolio_data(force_update=True)
+@timed
+def update_portfolio_data():
+    """Called on UI changes (shares, price, ESG). No market data fetch."""
+    data = get_portfolio_data_from_cache()
 
     return jsonify({
         'portfolio': data['portfolio'].to_dict(),
         'income_plot': data['income_plot'].to_json()
     })
-          
+
+@timed
+def get_portfolio_data_from_cache():
+    """Rebuild portfolio math from cached metrics only."""
+    finance_managers = current_app.config['FINANCE_MANAGERS']        
+    portfolio = PortfolioManager.from_cache(  
+        asset_classes=['stocks', 'crypto'],
+        storage_utils=storage_utils,
+        finance_managers=finance_managers,
+    )
+    income_plot = plotting_utils.create_income_plot(portfolio.total_income_data)
+    return {'portfolio': portfolio, 'income_plot': income_plot} 
 
 @bp.route('/save_single_value/<asset_type>', methods=['POST'])
 def save_single_value(asset_type):
@@ -71,7 +96,6 @@ def save_single_value(asset_type):
     """
     print(f"save_single_value called for asset type {asset_type}")
     data = request.get_json()
-    
     ticker = data.get('ticker')
     field = data.get('field')
     value = data.get('value')
@@ -96,10 +120,16 @@ def save_single_value(asset_type):
     current_data = loaders[field](asset_type)
     current_data[ticker] = max(0.0, value)
     savers[field](current_data, asset_type)
-    session[field] = current_data
+    #session[field] = current_data
     
+    # Recalculate and return updated portfolio in the same request
+    portfolio_data = get_portfolio_data_from_cache()
     print("save_single_value out")
-    return jsonify({'status': 'success', 'message': f'Updated {field} for {ticker}.'})
+    return jsonify({
+        'status': 'success',
+        'portfolio': portfolio_data['portfolio'].to_dict(),
+        'income_plot': portfolio_data['income_plot'].to_json()
+    })
   
 @bp.route('/save_cash', methods=['POST'])
 def save_cash():
@@ -116,7 +146,6 @@ def save_cash():
 
 @bp.route('/add/<asset_class>', methods=['POST'])
 def add_asset(asset_class):
-    print("add_asset called")
     ticker = request.form.get('ticker', '').upper().strip()
     if ticker:
         assets = storage_utils.get_assets(asset_class)
@@ -124,7 +153,11 @@ def add_asset(asset_class):
             assets.append(ticker)
             save_assets(assets, asset_class)
             print(f"Added {ticker} to portfolio.")
-    return redirect(url_for('portfolio.portfolio_feature'))
+            # Download data for the new ticker before responding
+            finance_manager = current_app.config['FINANCE_MANAGERS'][asset_class]
+            interval = current_app.config['APP_CONFIG'].get("live_interval")
+            finance_manager.get_metrics(assets, interval=interval, force=False)
+    return '', 200
     
 def save_assets(asset_list, asset_class='stocks'):
     print("save_assets called")
@@ -139,41 +172,42 @@ def save_assets(asset_list, asset_class='stocks'):
 def delete_asset(asset_class, ticker):
     print(f"delete_asset called for: {asset_class}/{ticker}")
     assets = storage_utils.get_assets(asset_class)
+    if ticker not in assets:
+        return jsonify({'status': 'error', 'message': 'Ticker not found.'}), 404
+
+    # Remove from main asset list
+    assets.remove(ticker)
+    save_assets(assets, asset_class)
     
-    if ticker in assets:
-        # Remove from main asset list
-        assets.remove(ticker)
-        save_assets(assets, asset_class)
-        
-        # Clean up associated share & average price data
-        # TODO reduce the amount of files used?
-        shares = storage_utils.load_shares(asset_class)
-        prices = storage_utils.load_prices(asset_class)
-        env = storage_utils.load_env(asset_class)
-        soc = storage_utils.load_soc(asset_class)
-        gov = storage_utils.load_gov(asset_class)
-        cont = storage_utils.load_cont(asset_class)
-        shares.pop(ticker, None)
-        prices.pop(ticker, None)
-        env.pop(ticker, None)
-        soc.pop(ticker, None)
-        gov.pop(ticker, None)
-        cont.pop(ticker, None)
-        storage_utils.save_shares(shares, asset_class)
-        storage_utils.save_prices(prices, asset_class)
-        storage_utils.save_env(env, asset_class)
-        storage_utils.save_soc(soc, asset_class)
-        storage_utils.save_gov(gov, asset_class)
-        storage_utils.save_cont(cont, asset_class)
-        
-        # Clean up metrics and price history
-        finance_data.remove_from_metrics(ticker, asset_class)
-        finance_data.remove_from_price_history(ticker,'4h',category_name=asset_class)
-        finance_data.remove_from_price_history(ticker,'1d',category_name=asset_class)
-        
-        return jsonify({'status': 'success', 'message': f'{ticker} removed.'})
+    # Clean up associated share & average price data
+    # TODO reduce the amount of files used?
+    for loader, saver in [
+        (storage_utils.load_shares, storage_utils.save_shares),
+        (storage_utils.load_prices, storage_utils.save_prices),
+        (storage_utils.load_env,    storage_utils.save_env),
+        (storage_utils.load_soc,    storage_utils.save_soc),
+        (storage_utils.load_gov,    storage_utils.save_gov),
+        (storage_utils.load_cont,   storage_utils.save_cont),
+    ]:
+        d = loader(asset_class)
+        d.pop(ticker, None)
+        saver(d, asset_class)
     
-    return jsonify({'status': 'error', 'message': 'Ticker not found.'}), 404
+    # Clean up metrics and price history
+    live_interval = current_app.config['APP_CONFIG'].get("live_interval")
+    research_interval = current_app.config['APP_CONFIG'].get("research_interval")
+    finance_manager = current_app.config['FINANCE_MANAGERS'][asset_class]
+    finance_manager.remove_ticker(ticker,live_interval)
+    finance_manager.remove_ticker(ticker,research_interval)
+    
+    # Return fresh portfolio data, no reload needed
+    portfolio_data = get_portfolio_data_from_cache()
+    return jsonify({
+        'status': 'success',
+        'portfolio': portfolio_data['portfolio'].to_dict(),
+        'income_plot': portfolio_data['income_plot'].to_json()
+    })
+
     
 # Needed for returning correctly formatted numbers at initialisation
 @bp.app_template_filter('format_finance')
