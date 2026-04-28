@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 import re
 import nltk
-import pytrends
 import time
 from scipy import stats
 from functools import cached_property
 from app.utils.time_debug import timed
+from app.utils.news_data import NewsDataManager
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from pytrends.request import TrendReq
@@ -137,7 +137,7 @@ class TextAnalyser:
             bearish = len(terms & self.BEARISH_TERMS)
             total = len(terms)
             score = (bullish - bearish) / total if total > 0 else 0.0
-            logger.debug(f"terms: {terms}, bullish: {bullish}, bearish: {bearish}, total: {total}, score: {score}")
+            #logger.debug(f"terms: {terms}, bullish: {bullish}, bearish: {bearish}, total: {total}, score: {score}")
             
             label = 'bullish' if score > 0 else 'bearish' if score < 0 else 'neutral'
             results.append({
@@ -151,6 +151,12 @@ class TextAnalyser:
                 'bullish_terms': sorted(terms & self.BULLISH_TERMS),
                 'bearish_terms': sorted(terms & self.BEARISH_TERMS),
             })
+
+        if not results:
+            logger.warning(f"No significant clusters found after filtering.\nTry lowering min_dominance or disabling exclude_general")
+            return pd.DataFrame(columns=['score', 'label', 'dominance',
+                                     'n_bullish', 'n_bearish', 'n_terms',
+                                     'bullish_terms', 'bearish_terms'])
 
         return pd.DataFrame(results).set_index('cluster').sort_values('score', ascending=False)
     
@@ -373,19 +379,28 @@ class Metric:
             "type": self.type,
             "suffix": self.suffix
         }
-
-        Metric.registry.append(metric_info)
-
+        # Check duplicates
+        if not any(m["id"] == func.__name__ for m in Metric.registry):
+            Metric.registry.append(metric_info)
         return property(func)
     
 class AssetAnalyser:
-    def __init__(self, asset, price_history, variance_threshold: float = 0.70):
+    def __init__(self, asset,
+                 price_history: pd.DataFrame = None,
+                 news_manager: NewsDataManager = None,
+                 variance_threshold: float = 0.70):
         self.asset = asset
+        self._news_manager = news_manager
         self.variance_threshold = variance_threshold
 
-        self.data = price_history[self.asset.ticker].dropna()
-        self.percent_returns = self.data.pct_change().dropna()
-        
+        # Only build price-based attributes if data provided
+        if price_history is not None:
+            self.data = price_history[asset.ticker].dropna()
+            self.percent_returns = self.data.pct_change().dropna()
+        else:
+            self.data = None
+            self.percent_returns = None
+
         # Annualisation factor: 252 for daily data
         self.ann_factor = 252
         self.risk_free_rate = 0.0
@@ -393,7 +408,16 @@ class AssetAnalyser:
     @cached_property
     def text_analyser(self) -> TextAnalyser:
         """Lazily initialised with news headlines for this ticker."""
-        headlines = self._fetch_headlines()
+        if self._news_manager is None:
+            raise ValueError(
+                f"NewsDataManager required for text analysis of {self.asset.ticker}"
+            )
+        headline_dicts = self._news_manager.get_headlines(self.asset.ticker)        
+        if not headline_dicts:
+            logger.warning(f"No headlines for {self.asset.ticker}, using fallback")
+            headline_dicts = [{'title': f"{self.asset.ticker} stock market finance",
+                            'published': None, 'source': 'fallback'}]
+        headlines = [h['title'] for h in headline_dicts]  # extract strings
         logger.debug(f"headlines: {headlines}")
         return TextAnalyser(
             headlines,
@@ -413,144 +437,213 @@ class AssetAnalyser:
                 time.sleep(5)
         return pd.DataFrame()
     
-    @timed
-    def _fetch_headlines(self) -> list[str]: #TODO Move that to finance_data.py
-        """Fetch headlines from yfinance, fall back to Yahoo RSS."""
-        ticker_str = self.asset.ticker
-        
-        # Try yfinance first
-        try:
-            ticker_obj = yf.Ticker(ticker_str)
-            headlines = [item['title'] for item in ticker_obj.news 
-                        if 'title' in item]
-            if headlines:
-                logger.info(f"[NEWS] {ticker_str}: {len(headlines)} headlines from yfinance")
-                return headlines
-        except Exception as e:
-            logger.warning(f"[NEWS] yfinance failed for {ticker_str}: {e}")
-
-        # Fall back to Yahoo Finance RSS
-        try:
-            url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker_str}&region=US&lang=en-US"
-            feed = feedparser.parse(url)
-            headlines = [entry.title for entry in feed.entries if hasattr(entry, 'title')]
-            if headlines:
-                logger.info(f"[NEWS] {ticker_str}: {len(headlines)} headlines from RSS")
-                return headlines
-        except Exception as e:
-            logger.warning(f"[NEWS] RSS failed for {ticker_str}: {e}")
-
-        logger.warning(f"[NEWS] No headlines found for {ticker_str}, using fallback")
-        return [f"{ticker_str} stock market finance equity"]
-    
     @cached_property
     def mean_percent_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.percent_returns.mean()
     
     @cached_property
     def std_percent_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.percent_returns.std()
     
     @Metric(label="Sharpe ratio")
     def percent_sharpe_ratio(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return sharpe_ratio(self.percent_returns, self.risk_free_rate)
     
     @Metric(label="Semivariance") # TODO choice of returns?
     def percent_semivariance(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return semivariance(self.percent_returns)
     
     @Metric(label="Sortino ratio")
     def percent_sortino_ratio(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return sortino_ratio(self.percent_returns, self.risk_free_rate)
         
     @Metric(label="Symmetry score", suffix="%")
     def percent_symmetry_score(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return symmetry_score(self.percent_returns)
         
     @cached_property
     def percent_dp_normality_test(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return dp_normality_test(self.percent_returns)
 
     @Metric(label="D Agostino-Pearson stats")    
     def percent_normal_dp_stat(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         stat, _ = self.percent_dp_normality_test
         return stat
         
     @Metric(label="D Agostino-Pearson p-value")
     def percent_normal_dp_pvalue(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         _, pvalue = self.percent_dp_normality_test
         return pvalue
     
     @cached_property
     def percent_jb_normality_test(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return jb_normality_test(self.percent_returns)
 
     @Metric(label="Jarque-Bera stats")    
     def percent_normal_jb_stat(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         stat, _ = self.percent_jb_normality_test
         return stat
         
     @Metric(label="Jarque-Bera p-value")
     def percent_normal_jb_pvalue(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         _, pvalue = self.percent_jb_normality_test
         return pvalue
 
     @cached_property
     def percent_z_score(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return z_score(self.percent_returns)
     
     @Metric(label="Z-score max")
     def percent_zmax(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         max, _ = self.percent_z_score
         return max
     
     @Metric(label="Z-score min")
     def percent_zmin(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         _, min = self.percent_z_score
         return min
     
     @Metric(label="Number outliers")
     def percent_num_outliers(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return num_outliers(self.percent_returns)
     
     @property
     def annual_return(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.mean_percent_returns * self.ann_factor
 
     @property
     def annualised_volatility(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.std_percent_returns * np.sqrt(self.ann_factor)
     
     @Metric(label="Hist. VaR 95", suffix='%')
     def percent_historical_var(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return historical_var(self.percent_returns, 0.95)*100
     
     @Metric(label="Hist. CVaR 95", suffix='%')
     def percent_historical_cvar(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return historical_cvar(self.percent_returns, 0.95)*100
     
     @cached_property
     def student_t_params(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return stats.t.fit(self.percent_returns)
 
     @Metric(label="Student-t VaR 95", suffix='%')
     def percent_student_t_var(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return student_t_var(self.student_t_params, 0.95)*100
     
     @cached_property
     def standardised_percent_returns(self):
-        return (self.percent_returns-self.percent_returns.mean) / self.percent_returns.std()
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
+        return (self.percent_returns-self.percent_returns.mean()) / self.percent_returns.std()
 
 
 class PortfolioAnalyser:
-    def __init__(self, portfolio, price_history, 
+    def __init__(self, portfolio,
+                 price_history: pd.DataFrame = None,
+                 news_manager: NewsDataManager = None,
                  variance_threshold: float = 0.70, risk_free_rate=0.0):
         self.variance_threshold = variance_threshold
         self.portfolio = portfolio
+        self._news_manager = news_manager
         self.tickers = [a.ticker for a in portfolio.assets]
         
-        self.data = price_history[self.tickers].dropna()
-        self.returns = self.data.pct_change().dropna()
+        if price_history is not None:
+            self.data = price_history[self.tickers].dropna()
+            self.returns = self.data.pct_change().dropna()
+        else:
+            self.data = None
+            self.returns = None
         self.ann_factor = 252
         self.risk_free_rate = risk_free_rate
 
@@ -564,6 +657,7 @@ class PortfolioAnalyser:
             analysers[asset.ticker] = AssetAnalyser(
                 asset,
                 self.data,
+                news_manager=self._news_manager,
                 variance_threshold=self.variance_threshold
             )
 
@@ -571,12 +665,20 @@ class PortfolioAnalyser:
 
     @property
     def individual_annual_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         """Returns a numpy array of annual returns for all assets in the portfolio."""
         return np.array([a.annual_return for a in self.asset_analysers.values()])
 
     @timed
     def get_optimisation_inputs(self):
         """Package everything needed for the PortfolioOptimiser."""
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return {
             "annual_returns": self.individual_annual_returns,
             "covariance_matrix": self.ann_covariance_matrix.values,
@@ -589,51 +691,99 @@ class PortfolioAnalyser:
     @property
     def current_weights(self):
         """Extracts weights directly from the Asset object."""
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return np.array([a.weight / 100 for a in self.portfolio.assets])
 
     @property
     def percent_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.returns @ self.current_weights
     
     @property
     def log_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return get_log_returns(self.percent_returns)
     
     @property
     def ann_log_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.log_returns.mean() * self.ann_factor
 
     @property
     def ann_percent_returns(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         geometric_mean = ((1+self.percent_returns).prod()**(1/len(self.percent_returns)))-1  
         return (1+geometric_mean)**self.ann_factor - 1
 
     @property
     def percent_correlation_matrix(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.returns.corr()
 
     @property
     def correlation_matrix(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.log_returns.corr()
     
     @property
     def ann_covariance_matrix(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return self.returns.cov() * self.ann_factor
     
     @property
     def variance(self):
-        return self.weights.T @ self.returns.cov() @ self.weights
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
+        return self.current_weights.T @ self.returns.cov() @ self.current_weights
         
     @property
     def std(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return np.sqrt(self.variance)
     
     @property
     def sharpe_ratio(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return sharpe_ratio(self.percent_returns, self.risk_free_rate)
 
     @property
     def sortino_ratio(self):
+        if self.data is None:
+            raise ValueError(
+                f"Price history required"
+            )
         return sortino_ratio(self.percent_returns, self.risk_free_rate)
     
     @timed
@@ -644,7 +794,10 @@ class PortfolioAnalyser:
             for metric in Metric.registry:
                 metric_id = metric["id"]
                 # Read attribute from AssetAnalyser
-                value = getattr(analyser, metric_id)
+                try:
+                    value = getattr(analyser, metric_id)
+                except ValueError:
+                    value = None
                 if isinstance(value, float):
                     value = value
 

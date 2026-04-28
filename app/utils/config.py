@@ -9,7 +9,8 @@ DEFAULTS = {
     "research_interval": "1d",
     "div_cagr_years": 10,
     "benchmark_refresh_days": 7,
-    "lsa_variance_threshold": 0.60
+    "lsa_variance_threshold": 0.60,
+    "news_max_age_days": 90
 }
 
 STALE_THRESHOLD = {

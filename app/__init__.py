@@ -3,6 +3,7 @@ from app.utils import database
 from app.utils.config import AppConfig
 from app.utils.finance_data import FinanceDataManager
 from app.services.data_fetching import ResearchDataManager
+from app.utils.news_data import NewsDataManager
 from config import Config
 import logging
 
@@ -49,6 +50,10 @@ def create_app():
     app.extensions["research_dm"] = ResearchDataManager(
         app.config['FINANCE_MANAGERS'],
         app_config
+    )
+    app.config['NEWS_MANAGER'] = NewsDataManager(
+        cache_dir=app.config['DATA_FOLDER'],
+        config=app_config
     )
 
     from .routes import cashflow, portfolio, research

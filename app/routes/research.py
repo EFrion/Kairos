@@ -51,13 +51,19 @@ class PortfolioView(MethodView):
     @timed
     def _rebuild_analyser(self, stocks_data: pd.DataFrame) -> None:
         finance_managers = current_app.config['FINANCE_MANAGERS']
+        news_manager = current_app.config['NEWS_MANAGER']
+        app_config = current_app.config['APP_CONFIG']
+
         portfolio = PortfolioManager.from_cache(
             asset_classes=['stocks'],
             storage_utils=storage_utils,
             finance_managers=finance_managers,
         )
-        variance_threshold = current_app.config['APP_CONFIG'].get("lsa_variance_threshold")
-        analyser = PortfolioAnalyser(portfolio.stocks, stocks_data, variance_threshold=variance_threshold)
+        analyser = PortfolioAnalyser(
+            portfolio.stocks,
+            stocks_data,
+            news_manager=news_manager,
+            variance_threshold=app_config.get("lsa_variance_threshold"))
         current_app.extensions["portfolio_analyser"] = analyser
 
 class PortfolioDataAPI(MethodView):
@@ -130,8 +136,15 @@ class PortfolioDataAPI(MethodView):
                 theme = text_analyser.theme_dominance()
                 logger.info(f"Themes dominating:\n{theme}")
 
-                sentiment_score = text_analyser.cluster_sentiment()
-                logger.info(f"Cluster sentiment:\n{sentiment_score}")
+                sentiment = text_analyser.cluster_sentiment()
+                if sentiment.empty:
+                    logger.warning(f"No sentiment signal for {ticker} — insufficient headlines")
+                    return jsonify({
+                        "warning": f"Insufficient headlines for {ticker} to produce sentiment signal.",
+                        "fig_data": None
+                    }), 200
+                else:
+                    logger.info(f"\nSentiment: {sentiment}")
                 fig = plotting_utils.create_lsa_scatter(news_df)
             except Exception as e:
                 logger.error(f"[NEWS] LSA failed for {ticker}: {e}")

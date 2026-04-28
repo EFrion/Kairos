@@ -83,6 +83,7 @@
         
             <h2 id="chart-title" style="margin: 0; padding:20px;">{{ selected_ticker }}</h2>
             <div id="price-plot-container">
+                <div id="plot-message" style="display:none; padding:20px; color:orange;"></div>
             </div>
         </div>
     </div>
@@ -167,6 +168,11 @@
             async updateView() {
                 this.dom.tickerTitle.innerText = this.state.currentTicker;
                 
+                // Clear any previous message
+                const msgEl = document.getElementById('plot-message');
+                msgEl.style.display = 'none';
+                msgEl.innerText = '';
+
                 let url = `/get_data?ticker=${this.state.currentTicker}&mode=${this.state.currentMode}`;
                 if (this.state.currentMode === 'map-2dcorr' && this.state.secondaryTicker) {
                     url += `&ticker2=${this.state.secondaryTicker}`;
@@ -174,14 +180,26 @@
 
                 try {
                     const data = await this.fetchData(url);
-                    if (data.error) {
-                        this.dom.tickerContainer.innerHTML = 
-                            `<p style="color:orange; padding:20px">${data.error}</p>`;
+                    if (data.error || data.warning) {
+                        // Show message but DO NOT touch the Plotly container
+                        msgEl.style.color = data.error ? 'red' : 'orange';
+                        msgEl.innerText = data.error || data.warning;
+                        msgEl.style.display = 'block';
+                        // Clear the plot so stale data isn't shown
+                        Plotly.purge(this.dom.tickerContainer);
                         return;
                     }
                     const plotData = JSON.parse(data.fig_data);
-                    Plotly.react(this.dom.tickerContainer, plotData.data, plotData.layout, data.config)
-                        .then(() => preventScrollOnDropdown('lsa-chart'));
+                    await Plotly.react(
+                        this.dom.tickerContainer,
+                        plotData.data,
+                        { ...plotData.layout, autosize: true },
+                        data.config || {}
+                    );
+                    Plotly.relayout(this.dom.tickerContainer, {
+                        height: this.dom.tickerContainer.offsetHeight || 500
+                    });
+                    this.preventScrollOnDropdown('price-plot-container');
                     this.updateMetrics(data.metrics);
                 } catch (err) {
                     console.error("Asset Plot Error:", err);
