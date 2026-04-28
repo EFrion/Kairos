@@ -4,6 +4,8 @@ import os
 from app.utils import plotting_utils, storage_utils
 from app.models import PortfolioManager
 from app.utils.time_debug import timed
+import logging
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('portfolio', __name__)
 
@@ -94,7 +96,7 @@ def save_single_value(asset_type):
     """
     Handles saving feature update from an AJAX request.
     """
-    print(f"save_single_value called for asset type {asset_type}")
+    logger.debug(f"save_single_value called for asset type {asset_type}")
     data = request.get_json()
     ticker = data.get('ticker')
     field = data.get('field')
@@ -124,7 +126,7 @@ def save_single_value(asset_type):
     
     # Recalculate and return updated portfolio in the same request
     portfolio_data = get_portfolio_data_from_cache()
-    print("save_single_value out")
+    logger.debug("save_single_value out")
     return jsonify({
         'status': 'success',
         'portfolio': portfolio_data['portfolio'].to_dict(),
@@ -152,7 +154,7 @@ def add_asset(asset_class):
         if ticker not in assets:
             assets.append(ticker)
             save_assets(assets, asset_class)
-            print(f"Added {ticker} to portfolio.")
+            logger.info(f"Added {ticker} to portfolio.")
             # Download data for the new ticker before responding
             finance_manager = current_app.config['FINANCE_MANAGERS'][asset_class]
             interval = current_app.config['APP_CONFIG'].get("live_interval")
@@ -160,7 +162,7 @@ def add_asset(asset_class):
     return '', 200
     
 def save_assets(asset_list, asset_class='stocks'):
-    print("save_assets called")
+    logger.debug("save_assets called")
     data_dir = current_app.config['DATA_FOLDER']
     os.makedirs(data_dir, exist_ok=True)
     path = os.path.join(data_dir,f"{asset_class}_list.json")
@@ -170,7 +172,7 @@ def save_assets(asset_list, asset_class='stocks'):
         
 @bp.route('/delete/<asset_class>/<ticker>', methods=['POST'])
 def delete_asset(asset_class, ticker):
-    print(f"delete_asset called for: {asset_class}/{ticker}")
+    logger.debug(f"delete_asset called for: {asset_class}/{ticker}")
     assets = storage_utils.get_assets(asset_class)
     if ticker not in assets:
         return jsonify({'status': 'error', 'message': 'Ticker not found.'}), 404

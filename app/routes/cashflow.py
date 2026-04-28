@@ -2,6 +2,8 @@ from flask import Blueprint, render_template, request, session, redirect, url_fo
 from app.utils import database
 from datetime import datetime, date, timedelta
 import os
+import logging
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('cashflow', __name__)
 
@@ -17,7 +19,7 @@ EXPECTED_CATEGORIES = [
 def cashflow_feature():
     # Get the month from the URL (?month=2025-12)
     current_view = request.args.get('month', '')
-    #print("current_view: ", current_view)
+    logger.debug("current_view: ", current_view)
     
     try:
         parts = current_view.split('-')
@@ -38,9 +40,6 @@ def cashflow_feature():
         current_view = now.strftime('%Y-%m')
         view_year = now.year
 
-    #print("current_view: ", current_view)
-    #print("view_year: ", view_year)
-    
     # Load the raw cash flow data
     monthly_data = load_cash_flow_data(view_month=current_view)
     monthly_data.sort(key=lambda x: x['entry_date'], reverse=True) # Ensure it's chronologically descending
@@ -110,8 +109,6 @@ def cashflow_feature():
             if cat in category_yearly_sums:
                 category_yearly_sums[cat] += val
                 
-    #print("I'm now here in cashflow_feature")
-    
     # Alphabetical and categorical sorting
     income_list = []
     expense_list = []
@@ -137,16 +134,14 @@ def cashflow_feature():
     for u_key, values in expense_list:
         ordered_breakdown[u_key] = values
         
-    #print("ordered_breakdown: ", ordered_breakdown)
-    
     annual_sum_cat ={}
     for key, val in ordered_breakdown.items():
         annual_sum_cat[key] = sum(val)
-    #print("sum(ordered_breakdown):", annual_sum_cat)
+    logger.debug("sum(ordered_breakdown):", annual_sum_cat)
 
     # Summon the calculating function
     cash_flow_metrics = calculate_cash_flow(monthly_data, category_yearly_sums)
-    #print("cash_flow_metrics: ", cash_flow_metrics)
+    logger.debug("cash_flow_metrics: ", cash_flow_metrics)
     
     # Render the template
     return render_template('cashflow.html',
@@ -158,7 +153,7 @@ def cashflow_feature():
 
 def load_cash_flow_data(view_month=None):
     conn = get_db_connection()
-    #print(f"Searching for month: {view_month}") # Check format (should be YYYY-MM)
+    logger.debug(f"Searching for month: {view_month}") # Check format (should be YYYY-MM)
     
     try:
         if view_month:
@@ -169,7 +164,7 @@ def load_cash_flow_data(view_month=None):
             # Test: Fetch one One-Time entry without filters to see its raw format
             #sample = conn.execute("SELECT entry_date, frequency FROM cash_flow WHERE frequency = 'One-Time' LIMIT 1").fetchone()
             #if sample:
-                #print(f"DEBUG: Sample Entry Date in DB: '{sample['entry_date']}'")
+                #logger.debug(f"Sample Entry Date in DB: '{sample['entry_date']}'")
                 
             query = """ SELECT * FROM cash_flow
                         WHERE   (frequency = 'One-Time'
@@ -181,7 +176,7 @@ def load_cash_flow_data(view_month=None):
                             )
                     """
             rows = conn.execute(query, (view_month, f"{view_month}%", last_day, first_day)).fetchall()
-            #print(f"Found {len(rows)} rows for this month.")
+            logger.debug(f"Found {len(rows)} rows for this month.")
         else:
             # Fetch all rows from the database
             rows = conn.execute('SELECT * FROM cash_flow').fetchall()
@@ -213,14 +208,13 @@ def load_cash_flow_data(view_month=None):
         return data
     except Exception as e:
         # If the table doesn't exist, return an empty list 
-        print(f"No database found: {e}")
+        logger.error(f"No database found: {e}")
         return []
 
 def get_db_connection():
     database_dir = current_app.config['DATABASE_FOLDER']
     db_path = os.path.join(database_dir, 'finance_app.db')
     conn = database.sqlite3.connect(db_path)
-    #print("conn: ", conn)
     conn.row_factory = database.sqlite3.Row  # Access columns by name like a dictionary
     return conn
     
@@ -250,11 +244,11 @@ def calculate_cash_flow(monthly_data, category_yearly_sums):
         
         # Only process expected categories
         if category not in EXPECTED_CATEGORIES:
-             print(f"WARNING: Skipping unknown category: {category}")
+             logger.warning(f"Skipping unknown category: {category}")
              continue
                 
         amount = float(entry['amount_eur'])
-        #print("amount: ", amount)
+        logger.debug("amount: ", amount)
         
         # Accumulate monthly totals
         totals[category]['monthly'] += amount
@@ -265,10 +259,6 @@ def calculate_cash_flow(monthly_data, category_yearly_sums):
     for cat, annual_val in category_yearly_sums.items():
         if cat in totals:
             totals[cat]['annual'] = annual_val
-        
-#    for v in totals.values():
-#        #print("v['monthly']: ", v['monthly'])
-#        print("v['annual']: ", v['annual'])
         
     # Final calculation of net totals     
     total_net_monthly = sum(v['monthly'] for v in totals.values())
@@ -282,7 +272,7 @@ def calculate_cash_flow(monthly_data, category_yearly_sums):
     
 @bp.route('/add_cashflow_entry', methods=['POST'])
 def add_cashflow_entry():
-    #print("add_cashflow_entry called")
+    logger.debug("add_cashflow_entry called")
     if request.method == 'POST':
         try:
             # Retrieve data
@@ -314,20 +304,20 @@ def add_cashflow_entry():
             
             conn.commit()
             conn.close()
-            print(f"\nSuccessfully saved: {item_description}")
+            logger.info(f"\nSuccessfully saved: {item_description}")
             
         except Exception as e:
-            print(f"\nError saving transaction: {e}")
+            logger.error(f"\nError saving transaction: {e}")
         
     current_month = request.form.get('current_view', datetime.now().strftime('%Y-%m'))
     
-    #print("add_cashflow_entry out")
+    logger.debug("add_cashflow_entry out")
     return redirect(url_for('cashflow.cashflow_feature', month=current_month))
         
 
 @bp.route('/update_cashflow_entry/<int:entry_id>', methods=['POST'])
 def update_cashflow_entry(entry_id):
-    #print("update_cashflow_entry called")
+    logger.debug("update_cashflow_entry called")
     
     # Get data from the HTML form
     new_desc = request.form.get('item_description')
@@ -381,7 +371,7 @@ def update_cashflow_entry(entry_id):
     conn.commit()
     conn.close()
 
-    #print("update_cashflow_entry out")
+    logger.debug("update_cashflow_entry out")
     
     return redirect(url_for('cashflow.cashflow_feature',
                             month=current_view,
@@ -389,7 +379,7 @@ def update_cashflow_entry(entry_id):
     
 @bp.route('/delete_cashflow_entry/<int:entry_id>', methods=['POST'])
 def delete_cashflow_entry(entry_id):
-    #print("delete_cashflow_entry called")
+    logger.debug("delete_cashflow_entry called")
     
     try:
         conn = get_db_connection()
@@ -432,7 +422,7 @@ def delete_cashflow_entry(entry_id):
 
         conn.close()
 
-        #print("delete_cashflow_entry out")
+        logger.debug("delete_cashflow_entry out")
         
         # Return everything the JavaScript needs
         return jsonify({
@@ -446,7 +436,7 @@ def delete_cashflow_entry(entry_id):
         })
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -459,9 +449,9 @@ def migrate_db():
         # Add end_date (NULL means it's currently active/perpetual)
         conn.execute('ALTER TABLE cash_flow ADD COLUMN end_date TEXT')
         conn.commit()
-        print("\nMigration successful: Added start_date and end_date columns.")
+        logger.info("\nMigration successful: Added start_date and end_date columns.")
     except Exception as e:
-        print(f"Migration skipped or failed: {e}")
+        logger.error(f"Migration skipped or failed: {e}")
     finally:
         conn.close()
 
@@ -502,7 +492,7 @@ def datetime_format(value, format_string='%Y-%m-%d'):
 #    ''').fetchall()
 
 #    for dup in duplicates:
-#        print(f"Found duplicate: {dup['item_description']} on {dup['entry_date']}")
+#        logger.info(f"Found duplicate: {dup['item_description']} on {dup['entry_date']}")
 
 #    # Manually delete wrong entries if necessary
 #    # 'Detailed Transactions' and delete by ID:
@@ -518,5 +508,5 @@ def datetime_format(value, format_string='%Y-%m-%d'):
 #    # Check what is actually in there now
 #    all_items = conn.execute("SELECT id, item_description, amount_eur, start_date, frequency FROM cash_flow").fetchall()
 #    for item in all_items:
-#        print(f"ID: {item['id']} | {item['item_description']} | {item['amount_eur']}€ | {item['frequency']}")
+#        logger.info(f"ID: {item['id']} | {item['item_description']} | {item['amount_eur']}€ | {item['frequency']}")
 #    conn.close()

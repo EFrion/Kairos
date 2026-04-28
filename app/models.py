@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from app.utils import storage_utils
 from app.utils.time_debug import timed
-
+import logging
+logger = logging.getLogger(__name__)
 
 # class Metric:
 #     def __init__(self, id, label, type="finance",
@@ -399,7 +400,7 @@ class PortfolioManager:
             
         # Show summary
         if not silent:
-            print(self)
+            logger.info(self)
             
     @property
     def total_market_value(self):
@@ -523,9 +524,7 @@ class PortfolioManager:
         portfolios = {}
         for asset_type in asset_classes:
             tickers = storage_utils.get_assets(asset_type)
-            #print(f"[DEBUG] {asset_type} tickers: {tickers}")
             manager = finance_managers[asset_type]
-            #print(f"[DEBUG] manager category: {manager.category}")
             
             # Read directly from in-memory cache, fall back to disk JSON
             if not manager._static_metrics:

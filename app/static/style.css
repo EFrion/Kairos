@@ -396,7 +396,7 @@ table {
 .chart-container {
     flex-grow: 1;
     margin: auto;
-    min-height: 500px;
+    min-height: 0;
     background: white;
     padding: 0px;
     margin-top: 0;
@@ -407,7 +407,19 @@ table {
 }
 
 #price-plot-container {
-    flex-grow: 1; /* Ensures plot fills the height */
+    flex: 1 1 0;           /* grow, shrink, start from 0 */
+    min-height: 0;         /* critical — allows flex child to shrink below content size */
+    display: flex;
+    flex-direction: column;
+}
+
+/* Plotly renders a div.js-plotly-plot inside — make it fill too */
+#price-plot-container .js-plotly-plot,
+#price-plot-container .plot-container,
+#price-plot-container .svg-container {
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    height: 100% !important;
 }
 
 /* Style for the active row to make it pop */

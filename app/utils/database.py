@@ -1,6 +1,8 @@
 import sqlite3
 import os
 from flask import current_app
+import logging
+logger = logging.getLogger(__name__)
 
 def init_db():
     database_dir = current_app.config['DATABASE_FOLDER']
@@ -8,7 +10,7 @@ def init_db():
     os.makedirs(database_dir, exist_ok=True)
     db_path = os.path.join(database_dir, 'finance_app.db')
     
-    #print("db_path: ", db_path)
+    logger.debug(f"db_path: {db_path}")
     
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
@@ -30,5 +32,5 @@ def init_db():
 
 if __name__ == "__main__":
     init_db()
-    print("Database initialized.")
+    logger.info("Database initialized.")
     

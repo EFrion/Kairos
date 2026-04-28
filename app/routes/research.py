@@ -1,25 +1,21 @@
 from flask import Blueprint, render_template, request, jsonify, current_app
-from app.utils import plotting_utils, storage_utils, finance_data
+from app.utils import plotting_utils, storage_utils
 from app.models import PortfolioManager
 from app.analytics.optimiser import PortfolioOptimiser
-from app.services.data_fetching import ResearchDataManager
-from app.analytics.analyser import AssetAnalyser, PortfolioAnalyser
+from app.analytics.analyser import PortfolioAnalyser
+from app.utils.time_debug import timed
 import os
 import pickle
 import pandas as pd
 from flask.views import MethodView
+import logging
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('research', __name__)
 
 # TODO focus on stocks for now, add a general function later
 class PortfolioView(MethodView):
-    # def __init__(self):
-    #     finance_managers = current_app.config['FINANCE_MANAGERS']
-
-    #     # Initialise data manager once per view instance
-    #     self.dm = ResearchDataManager(finance_managers)
-    #     self.stocks_data = None
-
+    @timed
     def get(self):
         """
         Handle GET requests to /research: render the main portfolio page with initial data.
@@ -52,6 +48,7 @@ class PortfolioView(MethodView):
             title='Research'
         )
     
+    @timed
     def _rebuild_analyser(self, stocks_data: pd.DataFrame) -> None:
         finance_managers = current_app.config['FINANCE_MANAGERS']
         portfolio = PortfolioManager.from_cache(
@@ -59,10 +56,12 @@ class PortfolioView(MethodView):
             storage_utils=storage_utils,
             finance_managers=finance_managers,
         )
-        analyser = PortfolioAnalyser(portfolio.stocks, stocks_data)
+        variance_threshold = current_app.config['APP_CONFIG'].get("lsa_variance_threshold")
+        analyser = PortfolioAnalyser(portfolio.stocks, stocks_data, variance_threshold=variance_threshold)
         current_app.extensions["portfolio_analyser"] = analyser
 
 class PortfolioDataAPI(MethodView):
+    @timed
     def get(self):
         """
         Handle GET requests to /get_data: return JSON plot data for a ticker.
@@ -87,8 +86,10 @@ class PortfolioDataAPI(MethodView):
 
         ticker_df = asset_analyser.data.to_frame(name=ticker)
 
+        config = {}
         # Prepare plot figure JSON depending on mode
         if mode == 'price':
+            config = {'scrollZoom': True}
             fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20, 50, 200])
         elif mode == 'returns':
             returns_df = asset_analyser.percent_returns.to_frame(name=ticker)
@@ -105,16 +106,42 @@ class PortfolioDataAPI(MethodView):
         elif mode == 'trend':
             trend_df = asset_analyser.trend.drop(columns=['isPartial'], errors='ignore')
             fig = plotting_utils.create_trends_chart(trend_df, rolling_windows=[7])
-        elif mode == 'sentiment':
-            # Placeholder for future sentiment plot
-            fig = plotting_utils.create_price_chart(ticker_df, rolling_windows=[20, 50, 200])
+        elif mode == 'news':
+            try:
+                text_analyser = asset_analyser.text_analyser  # store reference to avoid repetition
+                news_df = text_analyser.lsa()
+                logger.info(f"LSA number of components: {len(news_df.columns)}")
+                # Intra-cluster similarity — returns a dict of DataFrames
+                intra = text_analyser.intra_cluster_similarity()
+                for cluster_name, sim_df in intra.items():
+                    logger.info(f"\nIntra-cluster similarity for {cluster_name}:\n{sim_df}")
+
+                # Inter-cluster similarity — returns a single DataFrame
+                inter = text_analyser.inter_cluster_similarity()
+                logger.info(f"\nInter-cluster similarity:\n{inter}")
+
+                # Document similarity — returns a single DataFrame
+                doc_sim = text_analyser.document_similarity()
+                logger.info(f"\nDocument similarity:\n{doc_sim}")
+
+                jaccard = text_analyser.document_jaccard_similarity()
+                logger.info(f"\nJaccard similarity:\n{jaccard}")
+
+                theme = text_analyser.theme_dominance()
+                logger.info(f"Themes dominating:\n{theme}")
+
+                sentiment_score = text_analyser.cluster_sentiment()
+                logger.info(f"Cluster sentiment:\n{sentiment_score}")
+                fig = plotting_utils.create_lsa_scatter(news_df)
+            except Exception as e:
+                logger.error(f"[NEWS] LSA failed for {ticker}: {e}")
+                return jsonify({"error": f"Could not build news analysis for {ticker}: {str(e)}"}), 500
         else:
             return jsonify({'error': 'Invalid mode'}), 400
 
         # Convert figure to JSON for frontend rendering
         fig_json = fig.to_json()
-
-        return jsonify({'fig_data': fig_json})
+        return jsonify({'fig_data': fig_json, 'config': config})
 
 # Register the views with URL rules
 bp.add_url_rule('/research', view_func=PortfolioView.as_view('portfolio_research'))
@@ -122,28 +149,27 @@ bp.add_url_rule('/get_data', view_func=PortfolioDataAPI.as_view('portfolio_data_
 
 
 @bp.route('/get_portfolio_data')
+@timed
 def get_portfolio_data():
-    print("get_portfolio_data called")
+    logger.debug("get_portfolio_data called")
 
     mode = request.args.get('mode', 'returns')
     if not mode:
         return "No mode provided", 400
         
     force_update = request.args.get('force_update') == 'true' # Check for button click
-    print(f"[DEBUG] get_portfolio_data called: mode={mode}, force_update={force_update}")
-
 
     analyser = current_app.extensions.get("portfolio_analyser")
     if analyser is None:
             return jsonify({"error": "Portfolio analyser not initialised"}), 500
     
-    print(f"[DEBUG] calling _build_figure")
     fig = _build_figure(mode, analyser, force_update)
 
     return jsonify({
             'fig_data': fig.to_json(),
         })
 
+@timed
 def _build_figure(mode, analyser, force_update):
     if mode == 'heatmap':
         return plotting_utils.plot_correlation_heatmap(analyser.percent_correlation_matrix)
@@ -155,40 +181,36 @@ def _build_figure(mode, analyser, force_update):
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
+@timed
 def _get_frontier(analyser, force_update):
-    print(f"[DEBUG] _get_frontier called, force_update={force_update}")
     cache_path = os.path.join(current_app.config['DATA_FOLDER'], "frontier_cache.pkl")
-    print(f"[DEBUG] cache exists: {os.path.exists(cache_path)}")
     # Load from cache
     if not force_update and os.path.exists(cache_path):
-        print("[DEBUG] loading from cache")
+        logger.info("Loading frontier from cache")
         try:
             with open(cache_path, 'rb') as f:
                 return pickle.load(f)
-            print("Loaded frontier from cache")
         except Exception:
             current_app.logger.error("Frontier cache load failed, recalculating")
     
-    print("[DEBUG] computing frontier")
     # Perform optimisation
     try:
         opt = PortfolioOptimiser(analyser)
         inputs = analyser.get_optimisation_inputs()
         bounds, constraints = opt.setup_optimisation_constraints(inputs['tickers'], 0.2, True)
         results = opt.perform_full_analysis(bounds, constraints)
-        print(f"[DEBUG] frontier computed successfully")
         with open(cache_path, 'wb') as f:
             pickle.dump(results, f)
-        print(f"[DEBUG] frontier saved to cache")
         return results
     except Exception as e:
-        print(f"[DEBUG] frontier computation failed: {e}")
+        logger.error(f"Frontier computation failed: {e}")
         raise
             
 
 #@bp.route('/expand_history/<asset_type>', methods=['POST']) #TODO
 #def expand_history(asset_type):
 @bp.route('/expand_history')
+@timed
 def expand_history():
     """
         Fetches data on user request.
@@ -199,14 +221,12 @@ def expand_history():
     new_start = request.args.get('start')
     if not new_start:
         return jsonify({"message": "Missing start date"}), 400
-    print("new_start: ", new_start)
+    logger.debug("new_start: ", new_start)
 
     target_start = pd.to_datetime(new_start)
     finance = current_app.config['FINANCE_MANAGERS']['stocks']
     interval = current_app.config['APP_CONFIG'].get("research_interval")
-    print(interval)
     tickers = finance._hist_prices.get(interval, pd.DataFrame()).columns.tolist()
-    print(tickers)
     # Trigger the backfill logic
     if not tickers:
         # Fall back to metrics JSON for ticker list

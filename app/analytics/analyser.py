@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
+import re
 import nltk
 import pytrends
 import time
 from scipy import stats
 from functools import cached_property
+from app.utils.time_debug import timed
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from pytrends.request import TrendReq
@@ -12,11 +14,350 @@ from pytrends.exceptions import TooManyRequestsError
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import yfinance as yf
+import feedparser
+import logging
+logger = logging.getLogger(__name__)
 
-nltk.download('/usr/share/punkt')
-nltk.download('/usr/share/punkt_tab')
-pytrends = TrendReq(hl='en-US', tz=360)
+def _ensure_nltk_resources():
+    for resource, path in [
+        ('stopwords',   'corpora/stopwords'),
+        ('wordnet',     'corpora/wordnet'),
+        ('punkt',     'tokenizers/punkt'),
+        ('punkt_tab', 'tokenizers/punkt_tab'),
+    ]:
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            nltk.download(resource, quiet=True)
 
+_ensure_nltk_resources()
+
+
+class TextAnalyser:
+    """
+    Preprocesses a corpus of documents and builds a term-document matrix
+    for downstream analysis (LSA, topic modelling, similarity search).
+    """
+
+    BULLISH_TERMS = {
+        'buy', 'upgrade', 'beat', 'upswing', 'boom', 'boost', 
+        'growth', 'demand', 'strong', 'outperform', 'raise',
+        'record', 'surge', 'profit', 'gain', 'positive'
+    }
+    BEARISH_TERMS = {
+        'sell', 'downgrade', 'miss', 'risk', 'warning', 'decline',
+        'uncertainty', 'disruption', 'crack', 'risky', 'loss',
+        'concern', 'weak', 'cut', 'merger', 'warn', 'stretched',
+        'overextended'
+    }
+    SPLIT_THRESHOLD = -0.15
+
+    def __init__(self, documents: list[str],
+                 n_components: int = None,
+                 variance_threshold: float = 0.70):
+        self._documents = documents
+        self._lemmatizer = WordNetLemmatizer()
+        self._stop_words = set(stopwords.words('english'))
+        self.n_components = n_components
+        self.variance_threshold = variance_threshold
+
+        # LSA. Focuses on the local importance of words within a document.
+        self._vectorizer = CountVectorizer(
+            tokenizer=self._preprocess,
+            token_pattern=None
+        )
+        # TD-IDF. Focuses on the global importance of words relative to the entire corpus.
+        self._tfidf_vectorizer = TfidfVectorizer(
+            tokenizer=self._preprocess,
+            token_pattern=None
+        )
+
+        # Lazy caches
+        self._tdm: pd.DataFrame | None = None
+        self._tfidf_matrix: pd.DataFrame | None = None
+        self._lsa_cache: dict[tuple, pd.DataFrame] = {}
+        self._token_sets: list[set] | None = None
+        self._clusters_cache: pd.Series | None = None
+
+    # ------------------------------------------------------------------ #
+    # Public interface                                                   #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def term_document_matrix(self) -> pd.DataFrame:
+        """Term-document matrix (terms as rows, documents as columns)."""
+        if self._tdm is None:
+            self._tdm = self._build_tdm()
+        return self._tdm
+    
+    @property
+    def tfidf_matrix(self) -> pd.DataFrame:
+        """TF-IDF matrix (terms as rows, documents as columns)."""
+        if self._tfidf_matrix is None:
+            self._tfidf_matrix = self._build_tfidf()
+        return self._tfidf_matrix
+
+    def lsa(self) -> pd.DataFrame:
+        """
+        Latent Semantic Analysis via SVD. Result is cached per parameter set.
+        Returns a DataFrame (terms as rows, components as columns).
+        """
+        key = (self.n_components, self.variance_threshold)
+        if key not in self._lsa_cache:
+            self._lsa_cache[key] = self._compute_lsa()
+        return self._lsa_cache[key]
+    
+    def clusters(self) -> pd.Series:
+        if self._clusters_cache is None:
+            self._clusters_cache = self._compute_clusters()
+        return self._clusters_cache
+    
+    def cluster_sentiment(  self, min_dominance: int = 2, 
+                            exclude_general: bool = True) -> pd.DataFrame:
+        """
+        Scores each cluster as bullish, bearish or neutral
+        based on term overlap with financial sentiment lexicon.
+        """
+        dominance = self.theme_dominance()
+        assignments = self.clusters()
+
+        # Only score clusters that appear in enough documents
+        significant_clusters = dominance[dominance >= min_dominance].index
+        assignments = assignments[assignments.isin(significant_clusters)]
+
+        if exclude_general:
+            assignments = assignments[assignments != 'Component_1']
+
+        results = []
+
+        for cluster_name, group in assignments.groupby(assignments):
+            terms = set(group.index.tolist())
+            bullish = len(terms & self.BULLISH_TERMS)
+            bearish = len(terms & self.BEARISH_TERMS)
+            total = len(terms)
+            score = (bullish - bearish) / total if total > 0 else 0.0
+            logger.debug(f"terms: {terms}, bullish: {bullish}, bearish: {bearish}, total: {total}, score: {score}")
+            
+            label = 'bullish' if score > 0 else 'bearish' if score < 0 else 'neutral'
+            results.append({
+                'cluster':       cluster_name,
+                'score':         round(score, 3),
+                'label':         label,
+                'dominance':     int(dominance[cluster_name]),
+                'n_bullish':     bullish,
+                'n_bearish':     bearish,
+                'n_terms':       total,
+                'bullish_terms': sorted(terms & self.BULLISH_TERMS),
+                'bearish_terms': sorted(terms & self.BEARISH_TERMS),
+            })
+
+        return pd.DataFrame(results).set_index('cluster').sort_values('score', ascending=False)
+    
+    def cluster_centroids(self) -> pd.DataFrame:
+        """
+        Computes the centroid vector for each cluster.
+        Returns a DataFrame (clusters as rows, components as columns).
+        """
+        df_lsa = self.lsa()
+        assignments = self.clusters()
+        return df_lsa.groupby(assignments).mean()
+
+    def intra_cluster_similarity(self) -> dict[str, pd.DataFrame]:
+        """
+        Cosine similarity matrix within each cluster.
+        Returns a dict: cluster_name -> similarity DataFrame.
+        """
+        df_lsa = self.lsa()
+        assignments = self.clusters()
+        result = {}
+
+        for cluster_name, group in assignments.groupby(assignments):
+            terms = group.index.tolist()
+            vectors = df_lsa.loc[terms]
+            sim_matrix = cosine_similarity(vectors)
+            result[cluster_name] = pd.DataFrame(
+                sim_matrix, index=terms, columns=terms
+            )
+        return result
+    
+    def inter_cluster_similarity(self) -> pd.DataFrame:
+        """
+        Cosine similarity between cluster centroids.
+        Returns a square DataFrame (clusters as both rows and columns).
+        """
+        centroids = self.cluster_centroids()
+        sim_matrix = cosine_similarity(centroids)
+        return pd.DataFrame(
+            sim_matrix,
+            index=centroids.index,
+            columns=centroids.index
+        )
+
+    def document_similarity(self) -> pd.DataFrame:
+        """
+        Pairwise cosine similarity between documents using TF-IDF.
+        Returns a square DataFrame (documents as both rows and columns).
+        """
+        labels = [f"Doc {i+1}" for i in range(len(self._documents))]
+        sim_matrix = cosine_similarity(self.tfidf_matrix.T)  # docs as rows
+        return pd.DataFrame(sim_matrix, index=labels, columns=labels)
+
+    def term_similarity(self, query: str) -> pd.Series:
+        """
+        Cosine similarity between a query string and each document (CountVectorizer).
+        Returns a Series sorted by descending similarity.
+        """
+        _ = self.term_document_matrix  # ensure vectorizer is fitted. Avoids "NotFittedError" if method accessed directly.
+        query_vec = self._vectorizer.transform([query])
+        doc_vecs = self._vectorizer.transform(self._documents)
+        scores = cosine_similarity(query_vec, doc_vecs).flatten()
+        return pd.Series(scores, index=self._documents).sort_values(ascending=False)
+    
+    def document_jaccard_similarity(self) -> pd.DataFrame:
+        """
+        Pairwise Jaccard similarity between documents.
+        Jaccard = |A n B| / |A u B| where A, B are sets of preprocessed tokens.
+        Returns a square DataFrame (documents as both rows and columns).
+        """
+        token_sets = self._preprocessed_token_sets
+        n = len(self._documents)
+        labels = [f"Doc {i+1}" for i in range(n)]
+        
+        matrix = np.ones((n, n))
+        for i in range(n):
+            for j in range(i + 1, n): # Compute only upper triangle
+                intersection = len(token_sets[i] & token_sets[j])
+                union = len(token_sets[i] | token_sets[j])
+                score = intersection / union if union > 0 else 0.0
+                matrix[i, j] = score
+                matrix[j, i] = score
+
+        return pd.DataFrame(matrix, index=labels, columns=labels)
+    
+    def theme_dominance(self) -> pd.Series:
+        """
+        Returns how many documents contribute to each cluster.
+        Higher = more recurring theme = more tradeable signal.
+        """
+        assignments = self.clusters()
+        tdm = self.term_document_matrix  # terms x docs
+        
+        dominance = {}
+        for cluster_name, group in assignments.groupby(assignments):
+            terms = group.index.tolist()
+            # Count docs that contain at least one term from this cluster
+            cluster_tdm = tdm.loc[terms]
+            docs_covered = (cluster_tdm > 0).any(axis=0).sum()
+            dominance[cluster_name] = int(docs_covered)
+        
+        return pd.Series(dominance).sort_values(ascending=False)
+
+    def add_documents(self, new_docs: list[str]) -> None:
+        """Add documents and invalidate all caches."""
+        self._documents.extend(new_docs)
+        self._tdm = None  # force rebuild on next access
+        self._tfidf_matrix = None
+        self._lsa_cache = {}
+        self._token_sets = None
+        self._clusters_cache = None
+
+    # ------------------------------------------------------------------ #
+    # Private helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _compute_lsa(self) -> pd.DataFrame:
+        n = self.n_components if self.n_components is not None else self._optimal_components()
+        svd = TruncatedSVD(n_components=n, random_state=42)
+        latent = svd.fit_transform(self.term_document_matrix)
+        return pd.DataFrame(
+            latent,
+            index=self.term_document_matrix.index,
+            columns=[f"Component_{i+1}" for i in range(n)]
+        )
+    
+    def _compute_clusters(self) -> pd.Series:
+        """
+        Assigns each term to its dominant LSA component.
+        Splits clusters where strong negative intra-similarity indicates two opposing sub-groups.
+        """
+        df_lsa = self.lsa()
+        assignments = df_lsa.abs().idxmax(axis=1).rename("cluster")
+        
+        # Detect and split mixed clusters
+        for cluster_name, group in assignments.groupby(assignments):
+            terms = group.index.tolist()
+            if len(terms) < 4:
+                continue
+            vectors = df_lsa.loc[terms]
+            sim_matrix = cosine_similarity(vectors)
+            
+            # If minimum similarity is strongly negative, split by sign of loading
+            if sim_matrix.min() < self.SPLIT_THRESHOLD:
+                loadings = df_lsa.loc[terms, cluster_name]
+                #logger.debug(f"df_las: {df_lsa.loc[terms, cluster_name]}, terms: {terms}, cluster_name: {cluster_name}")
+                for term in terms:
+                    sign = 'pos' if loadings[term] >= 0 else 'neg'
+                    assignments[term] = f"{cluster_name}_{sign}"
+        
+        return assignments
+
+    def _optimal_components(self) -> int:
+        """
+        Returns the minimum n_components that explain at least
+        variance_threshold of total variance.
+        """
+        tdm = self.term_document_matrix  # fits vectorizer if not already done
+        max_components = min(len(self._documents), 
+                         len(tdm.index)) - 1  # tdm.index = terms
+        
+        if max_components < 1:
+            logger.warning("Too few terms/documents for SVD, returning n_components=1")
+            return 1
+        
+        svd = TruncatedSVD(n_components=max_components, random_state=42)
+        svd.fit(tdm.T)
+        
+        cumulative_variance = svd.explained_variance_ratio_.cumsum()
+        # Find first index where cumulative variance exceeds threshold
+        n = int((cumulative_variance >= self.variance_threshold).argmax()) + 1
+        logger.info(f"[LSA] {n} components explain "
+            f"{cumulative_variance[n-1]:.1%} of variance "
+            f"(threshold={self.variance_threshold:.0%})")
+        return n
+
+    def _preprocess(self, text: str) -> list[str]:
+        """Tokenize, lemmatize, remove stopwords and punctuation."""
+        text = re.sub(r'[^\w\s-]', '', text) # Keep only hyphens
+        tokens = nltk.word_tokenize(text.lower())
+        tokens = [self._lemmatizer.lemmatize(t) for t in tokens]
+        tokens = [t for t in tokens if t not in self._stop_words] # Remove stop words
+        return tokens
+    
+    @property
+    def _preprocessed_token_sets(self) -> list[set]:
+        if self._token_sets is None:
+            self._token_sets = [set(self._preprocess(doc)) for doc in self._documents]
+        return self._token_sets
+
+    def _build_tdm(self) -> pd.DataFrame:
+        """Fit CountVectorizer and return term-document matrix (terms as rows)."""
+        matrix = self._vectorizer.fit_transform(self._documents)
+        df = pd.DataFrame(
+            matrix.toarray(),
+            columns=self._vectorizer.get_feature_names_out()
+        )
+        return df.T  # terms as rows, documents as columns
+    
+    def _build_tfidf(self) -> pd.DataFrame:
+        """Fit TfidfVectorizer and return TF-IDF matrix (terms as rows)."""
+        matrix = self._tfidf_vectorizer.fit_transform(self._documents)
+        df = pd.DataFrame(
+            matrix.toarray(),
+            columns=self._tfidf_vectorizer.get_feature_names_out()
+        )
+        return df.T
+    
 class Metric:
     registry = []
 
@@ -38,8 +379,9 @@ class Metric:
         return property(func)
     
 class AssetAnalyser:
-    def __init__(self, asset, price_history):
+    def __init__(self, asset, price_history, variance_threshold: float = 0.70):
         self.asset = asset
+        self.variance_threshold = variance_threshold
 
         self.data = price_history[self.asset.ticker].dropna()
         self.percent_returns = self.data.pct_change().dropna()
@@ -49,17 +391,57 @@ class AssetAnalyser:
         self.risk_free_rate = 0.0
 
     @cached_property
+    def text_analyser(self) -> TextAnalyser:
+        """Lazily initialised with news headlines for this ticker."""
+        headlines = self._fetch_headlines()
+        logger.debug(f"headlines: {headlines}")
+        return TextAnalyser(
+            headlines,
+            variance_threshold=self.variance_threshold
+        )
+    
+    @cached_property
     def trend(self):
-        pytrends = TrendReq()
+        client = TrendReq(hl='en-US', tz=0)
         clean_ticker = self.asset.ticker.split('.')[0]
 
         for _ in range(3):
             try:
-                pytrends.build_payload([clean_ticker], timeframe='today 12-m')
-                return pytrends.interest_over_time()
+                client.build_payload([clean_ticker], timeframe='today 12-m')
+                return client.interest_over_time()
             except TooManyRequestsError:
                 time.sleep(5)
         return pd.DataFrame()
+    
+    @timed
+    def _fetch_headlines(self) -> list[str]: #TODO Move that to finance_data.py
+        """Fetch headlines from yfinance, fall back to Yahoo RSS."""
+        ticker_str = self.asset.ticker
+        
+        # Try yfinance first
+        try:
+            ticker_obj = yf.Ticker(ticker_str)
+            headlines = [item['title'] for item in ticker_obj.news 
+                        if 'title' in item]
+            if headlines:
+                logger.info(f"[NEWS] {ticker_str}: {len(headlines)} headlines from yfinance")
+                return headlines
+        except Exception as e:
+            logger.warning(f"[NEWS] yfinance failed for {ticker_str}: {e}")
+
+        # Fall back to Yahoo Finance RSS
+        try:
+            url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker_str}&region=US&lang=en-US"
+            feed = feedparser.parse(url)
+            headlines = [entry.title for entry in feed.entries if hasattr(entry, 'title')]
+            if headlines:
+                logger.info(f"[NEWS] {ticker_str}: {len(headlines)} headlines from RSS")
+                return headlines
+        except Exception as e:
+            logger.warning(f"[NEWS] RSS failed for {ticker_str}: {e}")
+
+        logger.warning(f"[NEWS] No headlines found for {ticker_str}, using fallback")
+        return [f"{ticker_str} stock market finance equity"]
     
     @cached_property
     def mean_percent_returns(self):
@@ -157,11 +539,13 @@ class AssetAnalyser:
     
     @cached_property
     def standardised_percent_returns(self):
-        return (self.percent_returns-self.self.percent_returns.mean)
+        return (self.percent_returns-self.percent_returns.mean) / self.percent_returns.std()
 
 
 class PortfolioAnalyser:
-    def __init__(self, portfolio, price_history, risk_free_rate=0.0):
+    def __init__(self, portfolio, price_history, 
+                 variance_threshold: float = 0.70, risk_free_rate=0.0):
+        self.variance_threshold = variance_threshold
         self.portfolio = portfolio
         self.tickers = [a.ticker for a in portfolio.assets]
         
@@ -172,13 +556,15 @@ class PortfolioAnalyser:
 
         self.asset_analysers = self._build_asset_analysers()
 
+    @timed
     def _build_asset_analysers(self):
         analysers = {}
 
         for asset in self.portfolio.assets:
             analysers[asset.ticker] = AssetAnalyser(
                 asset,
-                self.data
+                self.data,
+                variance_threshold=self.variance_threshold
             )
 
         return analysers
@@ -188,6 +574,7 @@ class PortfolioAnalyser:
         """Returns a numpy array of annual returns for all assets in the portfolio."""
         return np.array([a.annual_return for a in self.asset_analysers.values()])
 
+    @timed
     def get_optimisation_inputs(self):
         """Package everything needed for the PortfolioOptimiser."""
         return {
@@ -249,6 +636,7 @@ class PortfolioAnalyser:
     def sortino_ratio(self):
         return sortino_ratio(self.percent_returns, self.risk_free_rate)
     
+    @timed
     def get_individual_metrics_data(self):
         data = {}
         for ticker, analyser in self.asset_analysers.items():
@@ -266,6 +654,7 @@ class PortfolioAnalyser:
         
         return data
     
+    @timed
     def to_dict(self):
         return {
             'schema': Metric.registry,
@@ -277,6 +666,7 @@ class PortfolioAnalyser:
         }
 
     # Function to calculate Beta
+    @timed
     def calculate_beta(self, returns, benchmark_returns):
         """
         Beta = Covariance(Asset, Benchmark) / Variance(Benchmark)
@@ -294,13 +684,15 @@ class PortfolioAnalyser:
         expected_return = risk_free_rate + beta * (benchmark_annual_return - risk_free_rate)
         return annual_return - expected_return
         
-
+    @timed
     def portfolio_return(self, weights, annual_returns):
         return np.sum(weights * annual_returns)
 
+    @timed
     def portfolio_volatility(self, weights, covariance_matrix):
         return np.sqrt(weights.T @ covariance_matrix @ weights)
     
+    @timed
     def _calculate_portfolio_metrics_full(self, weights, annual_returns, daily_returns_df_slice, annualised_covariance_matrix, risk_free_rate, benchmark_returns, benchmark_annual_return, lambda_s=None, lambda_k=None):
         """
         Calculates a comprehensive set of portfolio metrics.
@@ -329,7 +721,6 @@ class PortfolioAnalyser:
         metrics.update({
             'Return': p_return,
             'Volatility': p_volatility,
-            'Sharpe Ratio': (p_return - self.risk_free_rate) / p_volatility if p_volatility > 0 else 0
         })
         #metrics['Beta'] = p_beta
         #metrics['Alpha'] = p_alpha
@@ -358,6 +749,7 @@ class PortfolioAnalyser:
         return metrics
             
     # Calculate only undesired volatility (downside risk)
+    @timed
     def downside_deviation(self, weights, daily_returns_df_slice, risk_free_rate):
         """
         Calculates the annualised downside deviation for a portfolio.
@@ -387,6 +779,7 @@ class PortfolioAnalyser:
         annualised_downside_std = downside_std * np.sqrt(252)
         return annualised_downside_std
         
+    @timed
     def portfolio_skewness(self, weights, daily_returns_df_slice):
         """
         Calculates the skewness for a portfolio's daily returns.
@@ -395,6 +788,7 @@ class PortfolioAnalyser:
         return portfolio_daily_returns.skew()
         
     # Calculate extreme events in returns distribution
+    @timed
     def portfolio_kurtosis(self, weights, daily_returns_df_slice):
         """
         Calculates the kurtosis for a portfolio's daily returns.
@@ -405,12 +799,15 @@ class PortfolioAnalyser:
 
 # Standalone functions
 
+@timed
 def historical_var(returns, confidenceLevel):
     return np.quantile(returns, 1 - confidenceLevel)
 
+@timed
 def historical_cvar(returns, confidenceLevel):
     return returns[returns <= historical_var(returns,confidenceLevel)].mean()
 
+@timed
 def student_t_var(params, confidenceLevel):
     dof, loc, scale = params
     # Calculate the quantile for the left tail (VaR)
@@ -418,6 +815,7 @@ def student_t_var(params, confidenceLevel):
     # Return quantile as a number (e.g., decimal return)
     return quantile
 
+@timed
 def sharpe_ratio(returns, risk_free_rate=0.0, ann_factor=1):
     """
     Calculate the Sharpe ratio
@@ -426,6 +824,7 @@ def sharpe_ratio(returns, risk_free_rate=0.0, ann_factor=1):
     excess_return = returns.mean() - risk_free_rate
     return (excess_return / returns.std()) * np.sqrt(ann_factor)
 
+@timed
 def semivariance(returns, ann_factor=1):
     """
     Calculate the semivariance
@@ -435,14 +834,14 @@ def semivariance(returns, ann_factor=1):
     mean_return = returns.mean()
     downside_diff = (returns - mean_return).clip(upper=0) # Set positive deviations to 0
     semivar = (downside_diff ** 2).mean()
-    #print("stocks_semivariance: ", stocks_semivariance)
 
     # Average only on bad days
     #    stocks_mean2 = price_history.mean()
     #    stocks2_semivariance = ((price_history[price_history < stocks_mean2] - stocks_mean2) ** 2).mean()
-    #    print("stocks2_semivariance: ", stocks2_semivariance)
+    #    logger.debug("stocks2_semivariance: ", stocks2_semivariance)
     return semivar
 
+@timed
 def sortino_ratio(returns, risk_free_rate=0.0, ann_factor=1): #TODO merge with semivariance?
     """
     Calculate the Sortino ratio
@@ -454,31 +853,33 @@ def sortino_ratio(returns, risk_free_rate=0.0, ann_factor=1): #TODO merge with s
     semivar = (downside_diff ** 2).mean()
     semistd = np.sqrt(semivar)
     excess_return = mean_return - risk_free_rate
-    #print("stocks_semistd: ", stocks_semistd)
 
     return (excess_return / semistd) * np.sqrt(ann_factor)
     
-def get_log_returns(self,percent_returns):
-    value = (1+self.percent_returns).cumprod()
+@timed
+def get_log_returns(returns: pd.Series) -> pd.Series:
+    value = (1+returns).cumprod()
     return np.log(value).diff().dropna()
 
+@timed
 def symmetry_score(returns):
     counts = (returns > returns.mean()).sum()
-    #print("counts: ", counts)
     total = returns.count()
-    #print("total: ", total)
     return (counts/total)*100
 
+@timed
 def dp_normality_test(returns):
     # Normality test (D'Agostino-Pearson)
     stat, pvalue = stats.normaltest(returns)
     return stat, pvalue
 
+@timed
 def jb_normality_test(returns):
     # Normality test (Jarque-Bera)
     stat, pvalue = stats.jarque_bera(returns)
     return stat, pvalue
 
+@timed
 def z_score(returns):
     max = returns.max()
     min = returns.min()
@@ -488,6 +889,7 @@ def z_score(returns):
     z_score_min = (min - mean) / std
     return z_score_max, z_score_min
 
+@timed
 def num_outliers(returns):
     mean = returns.mean()
     std = returns.std()

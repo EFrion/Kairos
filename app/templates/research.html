@@ -77,7 +77,7 @@
                 <div class="tab" data-mode="returns">Returns</div>
                 <div class="tab" data-mode="map-2dcorr">2D correlation</div>
                 <div class="tab" data-mode="trend">Trend</div>
-                <div class="tab" data-mode="sentiment">Sentiment (soon)</div>
+                <div class="tab" data-mode="news">News</div>
             </div>
 
         
@@ -145,6 +145,16 @@
                 this.registerEventListeners();
                 this.updateView(); // Initial Asset Plot
                 this.updatePortfolioView(); // Initial Portfolio Plot
+
+                // Reflow plots when container resizes
+                const resizeObserver = new ResizeObserver(() => {
+                    if (this.dom.tickerContainer.data) {
+                        Plotly.relayout(this.dom.tickerContainer, {
+                            height: this.dom.tickerContainer.offsetHeight
+                        });
+                    }
+                });
+                resizeObserver.observe(this.dom.tickerContainer);
             }
 
             async fetchData(url) {
@@ -164,13 +174,39 @@
 
                 try {
                     const data = await this.fetchData(url);
+                    if (data.error) {
+                        this.dom.tickerContainer.innerHTML = 
+                            `<p style="color:orange; padding:20px">${data.error}</p>`;
+                        return;
+                    }
                     const plotData = JSON.parse(data.fig_data);
-                    Plotly.react(this.dom.tickerContainer, plotData.data, plotData.layout);
+                    Plotly.react(this.dom.tickerContainer, plotData.data, plotData.layout, data.config)
+                        .then(() => preventScrollOnDropdown('lsa-chart'));
                     this.updateMetrics(data.metrics);
                 } catch (err) {
                     console.error("Asset Plot Error:", err);
                     this.dom.tickerContainer.innerHTML = '<p style="color:red;">Error loading chart.</p>';
                 }
+            }
+
+            preventScrollOnDropdown(elementId) {
+                const container = document.getElementById(elementId);
+                if (!container) return;
+
+                // Plotly renders dropdowns as .updatemenu-container
+                const observer = new MutationObserver(() => {
+                    const dropdowns = container.querySelectorAll(
+                        '.updatemenu-container, .updatemenu-dropdown-button'
+                    );
+                    dropdowns.forEach(el => {
+                        el.addEventListener('wheel', (e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                        }, { passive: false });
+                    });
+                });
+
+                observer.observe(container, { childList: true, subtree: true });
             }
 
             updateMetrics(metrics) {

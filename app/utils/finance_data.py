@@ -6,10 +6,10 @@ from pandas.tseries.offsets import BDay
 import numpy as np
 from scipy.stats import linregress
 import json
-import logging
-import matplotlib.pyplot as plt
 from app.utils.config import AppConfig, STALE_THRESHOLD, INTERVAL_MAX_LOOKBACK
 from app.utils.time_debug import timed
+import logging
+logger = logging.getLogger(__name__)
 
 # To compare the P/B ratio of a stock to the five biggest companies by market cap, I use the benchmark below
 # TODO automate the choice of companies, and add the remaining sectors
@@ -105,7 +105,6 @@ class FinanceDataManager:
         if self._usd_eur is not None:
             return
         
-        #print("fetch_exchange_rates called")
         date_cache_path = os.path.join(self.cache_dir, f"last_fetch_date.json")
         
         # Default fallback values
@@ -120,19 +119,19 @@ class FinanceDataManager:
             try:
                 with open(date_cache_path, 'r') as f:
                     exchange_data.update(json.load(f))
-                print("\nLoaded last exchange rate: ", exchange_data["last_call_fx"])
+                logger.info(f"\nLoaded last exchange rate: {exchange_data["last_call_fx"]}")
             except (json.JSONDecodeError, IOError) as e:
-                print(f"Date cache file corrupted or empty, ignoring: {e}")
+                logger.warning(f"Date cache file corrupted or empty, ignoring: {e}")
         else:
-            print("\nDate cache file is 0 bytes, ignoring.")
+            logger.warning("\nDate cache file is 0 bytes, ignoring.")
             
         # Get last time function was called
         last_call_fx = datetime.strptime(exchange_data["last_call_fx"], "%Y-%m-%d").date()
-        print("last_call_fx: ", last_call_fx)
+        logger.debug("last_call_fx: {last_call_fx}")
         
         # Lazy loading logic (once per day)
         if date.today()>last_call_fx:
-            print("Fetching exhange rates.")        
+            logger.info("Fetching exhange rates.")        
 
             try:
                 # Fetch EUR/USD rate
@@ -151,15 +150,15 @@ class FinanceDataManager:
                 self._save_json(date_cache_path, exchange_data)
                 
             except Exception as e:
-                print(f"Error fetching exchange rates: {e}. Using last known/default rates.")
+                logger.error(f"Error fetching exchange rates: {e}. Using last known/default rates.")
                 
         else:
-            print("No need to update exchange rates for today.")
+            logger.info("No need to update exchange rates for today.")
             
         self._usd_eur = exchange_data["usd_eur_rate"]
         self._chf_eur = exchange_data["chf_eur_rate"]
 
-        print(f"Rates fetched: USD/EUR = {self._usd_eur:.4f}, CHF/EUR = {self._chf_eur:.4f}")
+        logger.info(f"Rates fetched: USD/EUR = {self._usd_eur:.4f}, CHF/EUR = {self._chf_eur:.4f}")
 
     @timed
     def _ensure_prices( self, tickers: list[str], interval: str,
@@ -237,7 +236,7 @@ class FinanceDataManager:
         target_ts = pd.to_datetime(target_start).tz_localize(None)
         if first is not None and target_ts >= first:
             return df  # Nothing to backfill
-        print(f"Backfilling history from {target_ts} to {first or datetime.now()}")
+        logger.info(f"Backfilling history from {target_ts} to {first or datetime.now()}")
         end = first if first is not None else pd.Timestamp.now().tz_localize(None)
         gap_prices = self._download_prices(tickers, interval, target_ts, end)
         return self._merge(gap_prices, df) if not gap_prices.empty else df
@@ -302,7 +301,7 @@ class FinanceDataManager:
             prices.columns = [str(c) for c in prices.columns]  # flatten any tuple labels
             return prices
         except KeyError as e:
-            print(f"Could not extract Close prices: {e}. Columns were: {raw.columns.tolist()}")
+            logger.error(f"Could not extract Close prices: {e}. Columns were: {raw.columns.tolist()}")
             return pd.DataFrame()
 
     def _merge(self, new: pd.DataFrame, existing: pd.DataFrame) -> pd.DataFrame:
@@ -324,7 +323,7 @@ class FinanceDataManager:
             "P/B": 0.0, "PEG": 0.0, "Earnings_Growth": 0.0, "Div_Yield": 0.0, "Div_CAGR": 0.0, 
             "Latest_Div_EUR": 0.0, "Months_Paid": [0]*12, "Sector": "N/A", "PayoutRatio": 0.0}
 
-        print(f"\nProcessing data for {ticker}")
+        logger.info(f"\nProcessing data for {ticker}")
         try:
             info = ticker_handle.info
             currency = info.get('currency', 'EUR')
@@ -340,7 +339,7 @@ class FinanceDataManager:
             self._fill_dividends(data, ticker_handle, currency)
 
         except Exception as e:
-            print(f"Error processing {ticker}: {e}")
+            logger.error(f"Error processing {ticker}: {e}")
 
         return data
     
@@ -358,13 +357,13 @@ class FinanceDataManager:
         
         if data["P/E"] == 0.0:
             eps_ttm = info.get('trailingEps') # If trailingPE is 0.0 (missing), try to calculate it manually using trailingEps
-            print("eps: ", eps_ttm)
+            logger.debug("eps: ", eps_ttm)
             # Use currentPrice from info or fallback to cached quote
             price_native = info.get('currentPrice') or (data["Quote"] if data["Quote"] != 0 else None)
-            print("price_native: ", price_native)
+            logger.debug("price_native: ", price_native)
             if eps_ttm and price_native:
                 data["P/E"] = round(price_native / eps_ttm, 2)
-                print(f"Calculated fallback P/E for {ticker}: {data['P/E']}")
+                logger.info(f"Calculated fallback P/E for {ticker}: {data['P/E']}")
 
         return data
     
@@ -375,43 +374,26 @@ class FinanceDataManager:
             if not income.empty:
                 
                 net_income = income.loc["Net Income"].T.to_frame(name="Earnings").sort_index()
-                #print("Here")
                 # TODO Include operating income later
                 #op_income = income.loc["Operating Income"].T.to_frame(name="Operating Income").sort_index()
-                
-                #print("data 1: ", net_income.index[-1].strftime('%Y-%m-%d'))
                 last_net_income = net_income["Earnings"].iloc[-1]
-                #print("Last net_income: ", last_net_income)
-                #print("op_income: ", op_income["Operating Income"].iloc[-1])
-                
-                #print("data 2: ", net_income.index[-2].strftime('%Y-%m-%d'))
                 penultimate_net_income = net_income["Earnings"].iloc[-2]
-                #print("Penultimate net_income: ", penultimate_net_income)
-                #print("op_income: ", op_income["Operating Income"].iloc[-2])
-                 
             
                 # Annual earnings growth (YoY)
                 if not np.isnan(last_net_income):
                     net_growth = last_net_income / abs(penultimate_net_income) - 1
                 else:
                     # Fallback necessary because Yahoo Finance may take time to update financial data.
-                    print(f"Last net income for {ticker} absent. Using previous two incomes.")
+                    logger.info(f"Last net income for {ticker} absent. Using previous two incomes.")
                     penpenultimate_net_income = net_income["Earnings"].iloc[-3]
-                    #print("Penpenultimate net_income: ", penpenultimate_net_income)
                     net_growth = penultimate_net_income / abs(penpenultimate_net_income) - 1
                     
-                #print("net_growth: ", net_growth)
                 data["Earnings_Growth"] = round(net_growth, 4) if isinstance(net_growth, (int, float)) else "N/A"
-                
-                #op_growth = op_income["Operating Income"].iloc[-1] / abs(op_income["Operating Income"].iloc[-2]) - 1
-                #data["Op_Inc_Growth"] = round(op_growth, 4) if isinstance(op_growth, (int, float)) else "N/A"
-                
-                #print("Quality check: ", abs(net_growth - op_growth))
                 
                 if isinstance(data["P/E"], float):
                     data["PEG"] = round(data["P/E"] / (net_growth * 100), 2)
         except Exception:
-            print("Couldn't get Income Statement!")
+            logger.warning("Couldn't get Income Statement!")
 
         return data
 
@@ -421,22 +403,15 @@ class FinanceDataManager:
         n_years_ago = datetime.today() - timedelta(days=self.DIV_CAGR_YEARS * 365)
         # Get dividend data
         actions = ticker_handle.actions
-        #print("actions: ", actions)
         
-        if not actions.empty and 'Dividends' in actions.columns and actions['Dividends'].sum() > 0:
-            #print("Action in here")
-            
+        if not actions.empty and 'Dividends' in actions.columns and actions['Dividends'].sum() > 0:            
             divs = actions[actions["Dividends"] > 0]["Dividends"].tz_localize(None) # Forget timezone
             if not divs.empty:
-                #print("divs in the place")
                 # TTM Yield
-                #print("divs.index: ", divs.index)
-                #print("one_year_ago: ", one_year_ago)
                 ttm_divs = divs[divs.index >= one_year_ago]
                 
                 # I focus on euro from here
                 if not ttm_divs.empty and data["Quote_EUR"] != 0.0:
-                    #print("ttm not empty")
                     ttm_sum_eur = ttm_divs.sum() * (self._usd_eur if currency == 'USD' else self._chf_eur if currency == 'CHF' else 1)
                     data["Div_Yield"] = round(ttm_sum_eur / data["Quote_EUR"], 4)
 
@@ -444,8 +419,6 @@ class FinanceDataManager:
                 for m_date in ttm_divs.index:
                     data["Months_Paid"][m_date.month - 1] = 1
                     
-                #print("being paid")
-
                 # Latest dividend amount
                 latest_div = divs.iloc[-1]
                 if isinstance(latest_div, (int, float)):
@@ -455,14 +428,9 @@ class FinanceDataManager:
                         latest_div = latest_div * self._chf_eur
                     data["Latest_Div_EUR"] = round(latest_div, 4)
                     
-                #print("latest div amount")
-
                 # Growth rate (CAGR via log-linear regression)
-                #print("divs.index: ", divs.index )
                 divs_filtered = divs[divs.index >= n_years_ago]
                 data["Div_CAGR"] = calculate_growth_rate(divs_filtered)
-                #print("data[Div_CAGR]: ", data["Div_CAGR"])
-
         return data
 
     def _get_sector_benchmark(self, sector: str) -> float:
@@ -477,9 +445,9 @@ class FinanceDataManager:
         is_missing = sector not in bench_data["values"]
 
         if is_stale:
-            print(f"\n{self.BENCHMARK_REFRESH_DAYS} days passed. Updating P/B benchmark for {sector}...")
+            logger.info(f"\n{self.BENCHMARK_REFRESH_DAYS} days passed. Updating P/B benchmark for {sector}...")
         elif is_missing:
-            print(f"\nSector {sector} is missing. Updating its P/B benchmark")
+            logger.info(f"\nSector {sector} is missing. Updating its P/B benchmark")
 
         if not (is_stale or is_missing):
             return bench_data["values"].get(sector, 0.0)
@@ -498,7 +466,7 @@ class FinanceDataManager:
                 continue
 
         result = round(sum(pb_values) / len(pb_values), 2) if pb_values else 0.0
-        print("result: ", result)
+        logger.info(f"{sector} P/B benchmark: ", result)
 
         bench_data["values"][sector] = result
         bench_data["dates"][sector] = date.today().isoformat()
@@ -535,7 +503,6 @@ class FinanceDataManager:
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
         is_stale = next_candle < now_utc
-        #print(f"[STALE] last candle close={last}+{interval}, next candle start={next_candle}, now_utc={now_utc}, stale={is_stale}")
         if not is_stale:
             self._weekend_sync_done = False # Reset when data is fresh
             return False
@@ -551,7 +518,7 @@ class FinanceDataManager:
     def _drop_from_csv(self, ticker: str, interval: str) -> None:
         path = self._get_price_path(interval)
         if not path:
-            print(f"Unknown interval '{interval}'")
+            logger.error(f"Unknown interval '{interval}'")
             return
         df = self._load_csv(path)
         if ticker in df.columns:
@@ -560,21 +527,21 @@ class FinanceDataManager:
             # Also evict from memory cache
             if interval in self._hist_prices:
                 self._hist_prices[interval] = df
-            print(f"{ticker} removed from price history ({interval})")
+            logger.info(f"{ticker} removed from price history ({interval})")
 
     def _drop_from_json(self, ticker: str) -> None:
         self._static_metrics = self._load_json(self._metrics_path, default={})
         if ticker in self._static_metrics:
             del self._static_metrics[ticker]
             self._save_json(self._metrics_path, self._static_metrics)
-            print(f"{ticker} removed from metrics")
+            logger.info(f"{ticker} removed from metrics")
 
     def _load_csv(self, path) -> pd.DataFrame:
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
                 return pd.read_csv(path, index_col="Datetime", parse_dates=True).dropna()
             except Exception as e:
-                print(f"Could not read {path}: {e}")
+                logger.warning(f"Could not read {path}: {e}")
         return pd.DataFrame()
 
     def _save_csv(self, df: pd.DataFrame, interval: str):
@@ -589,7 +556,7 @@ class FinanceDataManager:
                 with open(path, 'r') as f:
                     return json.load(f)
             except (json.JSONDecodeError, IOError) as e:
-                print(f"Could not read {path}: {e}")
+                logger.warning(f"Could not read {path}: {e}")
         return default
 
     def _save_json(self, path: str, data: dict) -> None:
@@ -598,47 +565,31 @@ class FinanceDataManager:
             with open(path, 'w') as f:
                 json.dump(data, f, indent=4)
         except IOError as e:
-            print(f"Could not write {path}: {e}")
+            logger.error(f"Could not write {path}: {e}")
 
 
 ###
 def calculate_growth_rate(divs_filtered):
     """Calculates dividend growth rate (CAGR) using log-linear regression."""
-    #print("calculate_growth_rate called")
     
     yearly_divs = divs_filtered.groupby(divs_filtered.index.year).sum()
     yearly_divs = yearly_divs[yearly_divs > 0] # Filter for log calculation
             
     growth_rate = "N/A"
     if len(yearly_divs) >= 2:
-        #print("yearly_divs.index: ", yearly_divs.index)
         # x-values (years from the start)
         x = yearly_divs.index - yearly_divs.index[0]
-        #print("x: ", x)
         
         # y-values (natural log of dividends)
-        #print("yearly_divs.values: ", yearly_divs.values)
         y = np.log(yearly_divs.values)
-        #print("y: ", y)
                 
         # Log-linear regression: slope is compounded growth rate
         #slope, intercept, rvalue, _, _ = linregress(x, y) # Uncomment to visualise regression
         slope, _, _, _, _ = linregress(x, y)
-        #print("slope: ", slope)
-        #print(f"R-squared: {rvalue**2:.6f}")
-        
-        # Uncomment to visualise regression
-#        plt.plot(x, y, 'o', label='original data')
-#        plt.plot(x, intercept + slope*x, 'r', label='fitted line')
-#        plt.legend()
-#        plt.show()
         
         growth_rate = np.exp(slope) - 1
         growth_rate = round(growth_rate, 4)
-        #print("growth_rate: ", growth_rate)
-            
-    #print("calculate_growth_rate out")
-    
+                
     return growth_rate
 
         

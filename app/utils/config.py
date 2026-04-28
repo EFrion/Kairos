@@ -1,13 +1,15 @@
 import json
 import os
 from datetime import timedelta
-
+import logging
+logger = logging.getLogger(__name__)
 
 DEFAULTS = {
     "live_interval": "15m",
     "research_interval": "1d",
     "div_cagr_years": 10,
     "benchmark_refresh_days": 7,
+    "lsa_variance_threshold": 0.60
 }
 
 STALE_THRESHOLD = {
@@ -43,14 +45,14 @@ class AppConfig:
 
     def _load(self):
         if not os.path.exists(self._path):
-            print(f"No config file found at {self._path}, creating with defaults.")
+            logger.warning(f"No config file found at {self._path}, creating with defaults.")
             self.save()  # write defaults to disk immediately
             return
         try:
             with open(self._path) as f:
                 self._data.update(json.load(f))
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Config load failed, using defaults: {e}")
+            logger.error(f"Config load failed, using defaults: {e}")
 
     def save(self):
         os.makedirs(os.path.dirname(self._path), exist_ok=True)

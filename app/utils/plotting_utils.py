@@ -1,16 +1,254 @@
-import matplotlib
-matplotlib.use('Agg') 
-# 'Agg' is a non-GUI backend designed for file output (like PNG, JPEG, etc.)
-
 import numpy as np
-import os
 import statsmodels.api as sm
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+from itertools import combinations
+from scipy.spatial.distance import cdist
 from scipy import stats
+import logging
+logger = logging.getLogger(__name__)
 
-def create_trends_chart(interest_over_time_df, terms=None, start_date=None, end_date=None, rolling_windows=None):
+
+### Private helpers
+
+def _filter_by_date(df: pd.DataFrame, 
+                    start_date=None, end_date=None) -> pd.DataFrame:
+    if start_date:
+        ts = pd.to_datetime(start_date) # Ensure timezone compatibility
+        if df.index.tz:
+            ts = ts.tz_localize(df.index.tz)
+        df = df[df.index >= ts]
+    if end_date:
+        ts = pd.to_datetime(end_date)
+        if df.index.tz:
+            ts = ts.tz_localize(df.index.tz)
+        df = df[df.index <= ts]
+    return df
+
+
+def _add_rolling_traces(fig: go.Figure, series: pd.Series, 
+                        name: str, windows: list[int]) -> None:
+    """Adds SMA traces to an existing figure in-place."""
+    for window in windows:
+        rolling = series.rolling(window=window).mean()
+        fig.add_trace(go.Scatter(
+            x=rolling.index.tolist(),
+            y=rolling.values.tolist(),
+            mode='lines',
+            name=f"{name} ({window}d SMA)",
+            line=dict(dash='dash', width=1.5),
+            hovertemplate=f"{name} {window}d SMA: %{{y:.2f}}<extra></extra>"
+        ))
+
+def _base_layout(**overrides) -> dict:
+    """Shared layout defaults for all charts."""
+    base = dict(
+        template='plotly_white',
+        margin=dict(l=20, r=20, t=60, b=20),
+        legend=dict(orientation='h', yanchor='bottom', 
+                    y=1.02, xanchor='right', x=1),
+        hovermode='x unified',
+    )
+    base.update(overrides)
+    return base
+
+def _price_layout(title: str) -> dict:
+    return _base_layout(
+        title=title,
+        xaxis_title='Date',
+        yaxis_title='Price',
+        dragmode='pan',
+        xaxis=dict(rangeslider=dict(visible=True), type='date', fixedrange=True),
+        yaxis=dict(type='log', autorange=True, 
+                   title='Price - Log Scale', fixedrange=False)
+    )
+
+def _trends_layout(title: str) -> dict:
+    return _base_layout(
+        title=title,
+        xaxis_title='Date',
+        xaxis=dict(rangeslider=dict(visible=True), type='date'),
+        yaxis=dict(autorange=True, title='Trends Index')
+    )
+
+def _merge_overlapping_labels(df_lsa: pd.DataFrame,
+                               threshold: float = 0.02) -> dict:
+    """
+    Returns a dict mapping each term to a merged label string
+    if it overlaps with nearby terms in n-dimensional component space.
+    Works for any number of components.
+    """
+
+    coords = df_lsa.values  # shape (n_terms, n_components)
+
+    # Normalize each axis by its range to make threshold scale-independent
+    ranges = np.ptp(coords, axis=0)
+    ranges[ranges == 0] = 1  # avoid division by zero for constant columns
+    normalized = coords / ranges
+
+    distances = cdist(normalized, normalized)
+    np.fill_diagonal(distances, np.inf)
+
+    terms = df_lsa.index.tolist()
+    merged = {}
+    assigned = set()
+
+    for i, term in enumerate(terms):
+        if i in assigned:
+            continue
+        close = [i] + [j for j in range(len(terms))
+                       if distances[i, j] < threshold and j not in assigned]
+        group_label = ', '.join(terms[k] for k in close)
+        for k in close:
+            merged[terms[k]] = group_label
+            assigned.add(k)
+
+    return merged
+
+### LSA charts
+
+def create_lsa_scatter(df_lsa: pd.DataFrame, seed: int = 42) -> go.Figure:
+    cols = df_lsa.columns.tolist()
+
+    if len(cols) == 3:
+        return _lsa_scatter_3d(df_lsa)
+    else:
+        return _lsa_scatter_2d_dropdown(df_lsa, seed)
+
+def _lsa_scatter_3d(df_lsa: pd.DataFrame) -> go.Figure:
+    col_x, col_y, col_z = df_lsa.columns[:3]
+    merged_labels = _merge_overlapping_labels(df_lsa)
+    hover_texts = [
+        f"<b>{merged_labels[term]}</b><br>"
+        f"({df_lsa.loc[term, col_x]:.4f}, "
+        f"{df_lsa.loc[term, col_y]:.4f}, "
+        f"{df_lsa.loc[term, col_z]:.4f})"
+        for term in df_lsa.index
+    ]
+    # Avoid duplicate text on the plot
+    seen_groups = set()
+    plot_labels = []
+    for term in df_lsa.index:
+        group = merged_labels[term]
+        if group in seen_groups:
+            plot_labels.append('')  # empty / group already labelled
+        else:
+            plot_labels.append(group)
+            seen_groups.add(group)
+
+    fig = go.Figure(go.Scatter3d(
+        x=df_lsa[col_x].tolist(),
+        y=df_lsa[col_y].tolist(),
+        z=df_lsa[col_z].tolist(),
+        mode='markers+text',
+        text=plot_labels,
+        textfont=dict(size=11),
+        marker=dict(size=5, color='#3498db', opacity=0.8),
+        hovertemplate='%{customdata}<extra></extra>',
+        customdata=hover_texts
+    ))
+    fig.update_layout(
+        title='LSA Term Space (3D)',
+        scene=dict(
+            xaxis_title=col_x,
+            yaxis_title=col_y,
+            zaxis_title=col_z
+        ),
+        font=dict(color='#043657'),
+    )
+    return fig
+
+def _lsa_scatter_2d_dropdown(df_lsa: pd.DataFrame, seed: int = 42) -> go.Figure:
+    cols = df_lsa.columns.tolist()
+    rng = np.random.default_rng(seed)
+    fig = go.Figure()
+    merged_labels = _merge_overlapping_labels(df_lsa)
+
+    seen_groups = set()
+    plot_labels = []
+    for term in df_lsa.index:
+        group = merged_labels[term]
+        if group in seen_groups:
+            plot_labels.append('')  # empty / group already labelled
+        else:
+            plot_labels.append(group)
+            seen_groups.add(group)
+
+    # Generate all pairwise combinations
+    pairs = list(combinations(cols, 2))
+
+    for i, (col_x, col_y) in enumerate(pairs):
+        hover_texts = [
+            f"<b>{merged_labels[term]}</b><br>"
+            f"({df_lsa.loc[term, col_x]:.5f}, "
+            f"{df_lsa.loc[term, col_y]:.5f})"
+            for term in df_lsa.index
+        ]
+        jitter_scale = (df_lsa[col_x].max() - df_lsa[col_x].min()) * 0.02
+        label_x = df_lsa[col_x] + rng.uniform(-jitter_scale, jitter_scale, len(df_lsa))
+        label_y = df_lsa[col_y] + rng.uniform(-jitter_scale, jitter_scale, len(df_lsa))
+
+        fig.add_trace(go.Scatter(
+            x=df_lsa[col_x].tolist(),
+            y=df_lsa[col_y].tolist(),
+            mode='markers',
+            marker=dict(size=10, color='#3498db', opacity=0.8),
+            hovertemplate='%{customdata}<extra></extra>',
+            customdata=hover_texts,
+            visible=(i == 0),  # only first pair visible initially
+            showlegend=False,
+            name=f'{col_x} vs {col_y}'
+        ))
+        fig.add_trace(go.Scatter(
+            x=label_x.tolist(),
+            y=label_y.tolist(),
+            mode='text',
+            text=plot_labels,
+            textfont=dict(size=11, color='#043657'),
+            textposition='top center',
+            hoverinfo='skip',
+            visible=(i == 0),
+            showlegend=False,
+            name=f'labels_{col_x}_{col_y}'
+        ))
+
+    # Build dropdown — each pair shows its two traces (marker + label)
+    buttons = []
+    for i, (col_x, col_y) in enumerate(pairs):
+        visibility = [False] * (len(pairs) * 2)
+        visibility[i * 2] = True      # marker trace
+        visibility[i * 2 + 1] = True  # label trace
+        buttons.append(dict(
+            label=f'{col_x} vs {col_y}',
+            method='update',
+            args=[
+                {'visible': visibility},
+                {'xaxis': {'title': col_x},
+                 'yaxis': {'title': col_y},
+                 'title': f'LSA: {col_x} vs {col_y}'}
+            ]
+        ))
+
+    fig.update_layout(
+        updatemenus=[dict(
+            buttons=buttons,
+            direction='down',
+            x=0.0,
+            y=1.1,
+            showactive=True
+        )],
+        title=f'LSA: {pairs[0][0]} vs {pairs[0][1]}',
+        xaxis_title=pairs[0][0],
+        yaxis_title=pairs[0][1],
+        font=dict(color='#043657'),
+    )
+    return fig
+
+### Time series charts
+
+def create_trends_chart(interest_over_time_df,terms=None, start_date=None, 
+                        end_date=None, rolling_windows=None) -> go.Figure:
     """
     Line chart showing Google Trends interest over time for multiple terms.
 
@@ -25,80 +263,74 @@ def create_trends_chart(interest_over_time_df, terms=None, start_date=None, end_
         go.Figure: The Plotly figure object.
     """
 
-    df = interest_over_time_df.copy()
+    df = _filter_by_date(interest_over_time_df.copy(), start_date, end_date)
 
     # Filter terms if specified
     if terms:
         df = df[terms]
-
-    # Filter data based on dates
-    if start_date:
-        start_ts = pd.to_datetime(start_date)
-        if df.index.tz:
-            start_ts = start_ts.tz_localize(df.index.tz)
-        df = df[df.index >= start_ts]
-
-    if end_date:
-        end_ts = pd.to_datetime(end_date)
-        if df.index.tz:
-            end_ts = end_ts.tz_localize(df.index.tz)
-        df = df[df.index <= end_ts]
 
     # Create the figure
     fig = go.Figure()
 
     # Add a line for each term
     for term in df.columns:
-        term_series = df[term].dropna()
-
-        if not term_series.empty:
-            fig.add_trace(go.Scatter(
-                x=term_series.index.tolist(),
-                y=term_series.values.tolist(),
-                mode='lines',
-                name=term,
-                hovertemplate=f"<b>{term}</b><br>Trends Index: %{{y:.2f}}<extra></extra>"
-            ))
-
-        # Add rolling averages if specified
+        series = df[term].dropna()
+        if series.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=series.index.tolist(),
+            y=series.values.tolist(),
+            mode='lines',
+            name=term,
+            hovertemplate=f"<b>{term}</b><br>Trends Index: %{{y:.2f}}<extra></extra>"
+        ))
         if rolling_windows:
-            for window in rolling_windows:
-                rolling_mean = term_series.rolling(window=window).mean()
-                fig.add_trace(go.Scatter(
-                    x=rolling_mean.index.tolist(),
-                    y=rolling_mean.values.tolist(),
-                    mode='lines',
-                    name=f"{term} ({window}d SMA)",
-                    line=dict(dash='dash', width=1.5),
-                    hovertemplate=f"{term} {window}d SMA: %{{y:.2f}}<extra></extra>"
-                ))
+            _add_rolling_traces(fig, series, term, rolling_windows)
 
     # Update layout
-    fig.update_layout(
-        title='Interest over time',
-        xaxis_title='Date',
-        yaxis_title='Google Trends index',
-        hovermode="x unified",
-        template="plotly_white",
-        margin=dict(l=20, r=20, t=60, b=20),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        xaxis=dict(
-            rangeslider=dict(visible=True),
-            type='date'
-        ),
-        yaxis=dict(
-            autorange=True,
-            title='Trends Index'
-        )
-    )
+    fig.update_layout(**_trends_layout('Interest over time'))
 
     return fig
+
+def create_price_chart(stocks_data, start_date=None, end_date=None, rolling_windows=None) -> go.Figure:
+    """
+    Line chart showing price history for multiple assets.
+    
+    Args:
+        stocks_data (pd.DataFrame): DataFrame with 'Date' index and tickers as columns.
+        start_date (str/datetime): Start date for filtering (e.g., '2024-01-01').
+        end_date (str/datetime): End date for filtering.
+        rolling_windows (list): List of integers for rolling means, e.g., [50, 200].
+    Returns:
+        go.Figure: The Plotly figure object.
+    """
+
+    df = _filter_by_date(stocks_data.copy(), start_date, end_date)    
+
+    # Create the figure
+    fig = go.Figure()
+
+    # Add a line for each ticker
+    for ticker in df.columns:
+        series = df[ticker].dropna()
+        if series.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=series.index.tolist(),
+            y=series.values.tolist(),
+            mode='lines',
+            name=ticker,
+            hovertemplate=f"<b>{ticker}</b><br>Price: %{{y:.2f}}<extra></extra>"
+        ))
+        if rolling_windows:
+            _add_rolling_traces(fig, series, ticker, rolling_windows)
+
+    # Update layout
+    fig.update_layout(**_price_layout('Price history'))
+    
+    return fig
+
+### Portfolio charts
 
 def plot_efficient_frontier_and_portfolios(
     results,
@@ -305,7 +537,8 @@ def create_income_plot(income_data, title="Expected monthly income"):
     
     return fig
 
-# Plot correlation matrix between assets
+### Analysis charts
+
 def plot_correlation_heatmap(correlation_matrix):
     """
     Plot a heatmap of the correlation matrix.
@@ -313,17 +546,10 @@ def plot_correlation_heatmap(correlation_matrix):
     Args:
         correlation_matrix (pd.DataFrame): The correlation matrix of stock returns.
     """
-    print("plot_correlation_heatmap called")
-    
-#    print("correlation_matrix.values.tolist: " , correlation_matrix.values.tolist())
-#    print("correlation_matrix.columns.tolist: " , correlation_matrix.columns.tolist())
-#    print("correlation_matrix.index.tolist: " , correlation_matrix.index.tolist())
+    logger.debug("plot_correlation_heatmap called")
 
     matrix_values = correlation_matrix.round(3).values.tolist()
     tickers = correlation_matrix.columns.tolist()
-    #num_assets = len(tickers)
-    
-    #dynamic_size = min(500, (num_assets * 35) + 150)
     
     heatmap = go.Heatmap(
         z=matrix_values,
@@ -339,49 +565,6 @@ def plot_correlation_heatmap(correlation_matrix):
     
     fig = go.Figure(data=[heatmap])
     
-#    fig.update_layout(
-#        autosize=True,
-#        template="plotly_white",
-#         margin=dict(l=40, r=40, t=10, b=40), 
-#        yaxis=dict(
-#            autorange='reversed',
-#            #scaleanchor="x",
-#            #scaleratio=1,
-#            domain=[0, 1],  # full vertical space
-#            side='left',
-#            tickangle=0,
-#            ticks='outside',
-#            showline=True,
-#            linewidth=1,
-#            linecolor='black',
-#            mirror=True,
-#            automargin=True
-#        ),
-#        xaxis=dict(
-#            tickangle=45,
-#            side='bottom',
-#            ticks='outside',
-#            showline=True,
-#            linewidth=1,
-#            linecolor='black',
-#            mirror=True,
-#            automargin=True
-#        ),
-#        coloraxis_colorbar=dict(
-#            thickness=20,      # thinner legend bar
-#            len=0.8,          # height relative to plot (80%)
-#            y=0.5,            # center vertically
-#            yanchor='middle',
-#            x=1.02,           # push closer to heatmap (default is ~1.05)
-#            ticks='outside',
-#            outlinewidth=1,
-#            outlinecolor='black'
-#        )
-#    )
-#    
-#    fig.update_xaxes(tickson='boundaries')
-#    fig.update_yaxes(tickson='boundaries')
-
     fig.update_layout(
         autosize=True,
         template="plotly_white",
@@ -424,11 +607,8 @@ def plot_correlation_heatmap(correlation_matrix):
         automargin=True
     )
 
-
-    print("plot_correlation_heatmap out ")
-    
+    logger.debug("plot_correlation_heatmap out ")
     return fig
-    
     
 def create_2d_correlation_map(stocks_data_ticker1, stocks_data_ticker2):
     """
@@ -510,7 +690,7 @@ def create_2d_correlation_map(stocks_data_ticker1, stocks_data_ticker2):
         corr_coef = map2d.iloc[:, 0].corr(map2d.iloc[:, 1])
         fig.update_layout(title=f"Correlation: {name1} vs {name2} (Pearson r = {corr_coef:.3f} | R² = {r_squared:.3f})")
     except Exception as e:
-        print(f"Regression error: {e}")
+        logger.error(f"Regression error: {e}")
 
     # Add the vertical and horizontal crosshair lines (at 0,0)
     fig.add_vline(x=0, line_dash="dash", line_color="grey", line_width=1)
@@ -525,92 +705,6 @@ def create_2d_correlation_map(stocks_data_ticker1, stocks_data_ticker2):
 
     return fig
 
-def create_price_chart(stocks_data, start_date=None, end_date=None, rolling_windows=None):
-    """
-    Line chart showing price history for multiple assets.
-    
-    Args:
-        stocks_data (pd.DataFrame): DataFrame with 'Date' index and tickers as columns.
-        start_date (str/datetime): Start date for filtering (e.g., '2024-01-01').
-        end_date (str/datetime): End date for filtering.
-        rolling_windows (list): List of integers for rolling means, e.g., [50, 200].
-    Returns:
-        go.Figure: The Plotly figure object.
-    """
-
-    df = stocks_data.copy()
-    
-    # Filter data based on dates
-    if start_date:
-        start_ts = pd.to_datetime(start_date) # Ensure timezone compatibility if the DataFrame is localized to UTC
-        if df.index.tz:
-            start_ts = start_ts.tz_localize(df.index.tz)
-        df = df[df.index >= start_ts]
-        
-    if end_date:
-        end_ts = pd.to_datetime(end_date)
-        if df.index.tz:
-            end_ts = end_ts.tz_localize(df.index.tz)
-        df = df[df.index <= end_ts]
-
-    # Create the figure
-    fig = go.Figure()
-
-    # Add a line for each ticker
-    for ticker in df.columns:
-        ticker_series = df[ticker].dropna()
-        
-        if not ticker_series.empty:
-            fig.add_trace(go.Scatter(
-                x=ticker_series.index.tolist(),        # The filtered dates
-                y=ticker_series.values.tolist(),       # The filtered prices
-                mode='lines',
-                name=ticker,
-                hovertemplate=f"<b>{ticker}</b><br>Price: %{{y:.2f}}<extra></extra>"
-            ))
-            
-        # Add rolling averages (optional)
-        if rolling_windows:
-            for window in rolling_windows:
-                rolling_mean = ticker_series.rolling(window=window).mean()
-                
-                fig.add_trace(go.Scatter(
-                    x=rolling_mean.index.tolist(),
-                    y=rolling_mean.values.tolist(),
-                    mode='lines',
-                    name=f"{ticker} ({window}d SMA)",
-                    line=dict(dash='dash', width=1.5), # Dashed line for distinction
-                    hovertemplate=f"{ticker} {window}d SMA: %{{y:.2f}}<extra></extra>"
-                ))
-
-    # Update layout
-    fig.update_layout(
-        title='Historical Asset Prices',
-        xaxis_title='Date',
-        yaxis_title='Price',
-        hovermode="x unified",  # Shows all asset prices for a single date on hover
-        template="plotly_white",
-        margin=dict(l=20, r=20, t=60, b=20),
-        legend=dict(
-            orientation="h", 
-            yanchor="bottom", 
-            y=1.02, 
-            xanchor="right", 
-            x=1
-        ),
-        xaxis=dict(
-            rangeslider=dict(visible=True), # Adds the bottom slide bar
-            type='date'
-        ),
-        yaxis=dict(
-            type='log',  # Changes the scale to Logarithmic
-            autorange=True,
-            title='Price - Log Scale'
-        )
-    )
-    
-    return fig
-    
 def create_returns_distribution_chart(returns, student_t_params=None):
     """
     Distribution plot for returns.
@@ -618,7 +712,7 @@ def create_returns_distribution_chart(returns, student_t_params=None):
     Input: DataFrame with one column of prices
     Output: Plotly figure (Histogram of returns)
     """
-    print("create_returns_distribution_chart called")
+    logger.debug("create_returns_distribution_chart called")
     
     # Clean data in case it's not done before
     data = returns.replace([np.inf, -np.inf], np.nan).dropna()
@@ -633,15 +727,8 @@ def create_returns_distribution_chart(returns, student_t_params=None):
         fig.add_annotation(text="Insufficient data for returns", showarrow=False)
         return fig
         
-    #print("data: ", data)
-    
     # Create histogram
     fig = go.Figure()
-    # data_min = data.min()
-    # data_max = data.max()
-    #print("data_min: ", data_min)
-    #print("data_max: ", data_max)
-    #print("len data: ", len(data))
     
     fig.add_trace(go.Histogram(
         x=data.tolist(),
@@ -673,7 +760,6 @@ def create_returns_distribution_chart(returns, student_t_params=None):
             ))
             
     # Add a Student's t fit
-    #params = stats.t.fit(data) # Maximum Likelihood Estimation
     if student_t_params is None:
         student_t_params = stats.t.fit(data)
 
@@ -695,10 +781,9 @@ def create_returns_distribution_chart(returns, student_t_params=None):
         xaxis=dict(tickformat=".2%")
     )
     
-    print("create_returns_distribution_chart out")
+    logger.debug("create_returns_distribution_chart out")
     
     return fig
-
 
 if __name__ == '__main__':
 
@@ -708,5 +793,4 @@ if __name__ == '__main__':
         {"Ticker": "StockC", "Months_Paid": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]},
         {"Ticker": "StockD", "Months_Paid": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]},
     ]
-    plot_file = create_monthly_dividends_plot(simulated_stock_metrics)
-    print(f"Plot saved to: {plot_file}")
+    #plot_file = create_monthly_dividends_plot(simulated_stock_metrics)
