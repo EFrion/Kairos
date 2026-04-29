@@ -274,6 +274,9 @@ class TextAnalyser:
 
     def _compute_lsa(self) -> pd.DataFrame:
         n = self.n_components if self.n_components is not None else self._optimal_components()
+        if n == 0:  # ← abort gracefully
+            logger.warning("LSA aborted: insufficient corpus.")
+            return pd.DataFrame()  # empty, caller handles it
         svd = TruncatedSVD(n_components=n, random_state=42)
         latent = svd.fit_transform(self.term_document_matrix)
         return pd.DataFrame(
@@ -317,9 +320,9 @@ class TextAnalyser:
         max_components = min(len(self._documents), 
                          len(tdm.index)) - 1  # tdm.index = terms
         
-        if max_components < 1:
+        if max_components < 2:
             logger.warning("Too few terms/documents for SVD, returning n_components=1")
-            return 1
+            return 0
         
         svd = TruncatedSVD(n_components=max_components, random_state=42)
         svd.fit(tdm.T)
@@ -419,10 +422,11 @@ class AssetAnalyser:
                             'published': None, 'source': 'fallback'}]
         headlines = [h['title'] for h in headline_dicts]  # extract strings
         logger.debug(f"headlines: {headlines}")
-        return TextAnalyser(
-            headlines,
-            variance_threshold=self.variance_threshold
-        )
+        ta = TextAnalyser(headlines, variance_threshold=self.variance_threshold)
+        if ta.lsa().empty:
+            logger.warning(f"Insufficient corpus for {self.asset.ticker}")
+            return None
+        return ta
     
     @cached_property
     def trend(self):

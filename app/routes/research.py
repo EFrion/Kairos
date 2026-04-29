@@ -115,6 +115,10 @@ class PortfolioDataAPI(MethodView):
         elif mode == 'news':
             try:
                 text_analyser = asset_analyser.text_analyser  # store reference to avoid repetition
+                if text_analyser is None:
+                    return jsonify({
+                        "warning": f"Insufficient headlines for {ticker} to run LSA."
+                    }), 200
                 news_df = text_analyser.lsa()
                 logger.info(f"LSA number of components: {len(news_df.columns)}")
                 # Intra-cluster similarity — returns a dict of DataFrames

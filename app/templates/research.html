@@ -170,8 +170,10 @@
                 
                 // Clear any previous message
                 const msgEl = document.getElementById('plot-message');
-                msgEl.style.display = 'none';
-                msgEl.innerText = '';
+                if (msgEl) {
+                    msgEl.style.display = 'none';
+                    msgEl.innerText = '';
+                }
 
                 let url = `/get_data?ticker=${this.state.currentTicker}&mode=${this.state.currentMode}`;
                 if (this.state.currentMode === 'map-2dcorr' && this.state.secondaryTicker) {
@@ -181,10 +183,12 @@
                 try {
                     const data = await this.fetchData(url);
                     if (data.error || data.warning) {
-                        // Show message but DO NOT touch the Plotly container
-                        msgEl.style.color = data.error ? 'red' : 'orange';
-                        msgEl.innerText = data.error || data.warning;
-                        msgEl.style.display = 'block';
+                        // Show message without touching the Plotly container
+                        if (msgEl) {
+                            msgEl.style.color = data.error ? 'red' : 'orange';
+                            msgEl.innerText = data.error || data.warning;
+                            msgEl.style.display = 'block';
+                        }
                         // Clear the plot so stale data isn't shown
                         Plotly.purge(this.dom.tickerContainer);
                         return;
