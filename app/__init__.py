@@ -38,6 +38,7 @@ def create_app():
     ### Keep these verbose during development
     logging.getLogger('app.utils.finance_data').setLevel(logging.INFO)
     logging.getLogger('app.routes.portfolio').setLevel(logging.DEBUG)
+    logging.getLogger('app.models').setLevel(logging.DEBUG)
     
 
     # User config (intervals, CAGR years, etc.)

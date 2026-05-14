@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
-from app.utils import storage_utils
+from app.utils.storage_utils import AssetDataManager, PortfolioDataManager
 from app.utils.time_debug import timed
+from functools import cached_property
 import logging
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ class AssetData:
     gov: int = 0
     cont: int = 0
     weight: float = 0.0
+    syield: float = 0.0
 
+    fx_rates: Dict[str, float] = field(default_factory=dict)
     sector: str = field(init=False, default="Null")
     months_paid: List[int] = field(init=False, default_factory=lambda: [0]*12)
     quote: float = field(init=False, default=0.0)
@@ -76,6 +79,7 @@ class Asset(AssetData):
         self.bench_pb = self._safe_float(metrics.get('Sector_PB_Benchmark',0))
         self.earnings_gr = self._safe_float(metrics.get('Earnings_Growth',0)*100)
         self.payout_ratio = self._safe_float(metrics.get('PayoutRatio',0)*100)
+        self.currency = metrics.get("Currency", "USD").lower()
         
     METRIC_COLOUR_RULES = {
         'stocks':{
@@ -94,7 +98,8 @@ class Asset(AssetData):
             'weight': {'low': 4, 'high': 5, 'dir': 'low_is_better'}
         },
         'crypto':{
-            'weight': {'low': 40, 'high': 50, 'dir': 'low_is_better'}
+            'weight': {'low': 40, 'high': 50, 'dir': 'low_is_better'},
+            'syield': {'low': 2, 'high': 4, 'dir': 'high_is_better'}
         } 
     }
 
@@ -105,41 +110,54 @@ class Asset(AssetData):
         except (ValueError, TypeError):
             return 0.0
             
-    @property
+    @cached_property
     def market_value(self):
         return self.shares * self.quote_eur
         
-    @property
+    @cached_property
     def cost_basis(self):
-        return self.shares * self.price
+        #logger.debug("cost_basis called")
+        #logger.debug(f"Asset: {self.ticker}, Price: {self.price_eur}, Shares: {self.shares}")
+        return self.shares * self.price_eur
+    
+    @cached_property
+    def price_eur(self):
+        """
+        Dynamically calculates price in EUR based on the asset's currency.
+        """
+        # Matches 'usd' with 'usd_eur_rate'
+        #logger.debug("price_eur called")
+        rate_key = f"{self.currency}_eur_rate"
+        rate = self.fx_rates.get(rate_key, 1.0) # Default to 1.0 if already EUR or not found
+        #logger.debug(f"Asset: {self.ticker}, Price: {self.price}, Rate: {rate}")
+        return self.price * rate
         
-    @property
+    @cached_property
     def asset_income(self):
         return self.market_value * self.div_yield
         
     def get_monthly_income(self):
         if not hasattr(self, 'months_paid'): return [0.0] * 12
-            
         return [self.latest_div * self.shares if m == 1 else 0.0 for m in self.months_paid]
     
-    @property
+    @cached_property
     def annual_dividend(self):
         payment_frequency = sum(self.months_paid)
         total = self.latest_div * payment_frequency * self.shares
         return total
     
-    
     # Define schema for the HTML renderer
     def get_schema(self):
         # Common columns
         schema = [
-            {'id': 'ticker',    'label': 'Ticker',      'type': 'ticker'},
-            {'id': 'shares',    'label': 'Shares',      'type': 'input'},
-            {'id': 'price', 'label': 'Avg Price',   'type': 'input'},
+            {'id': 'ticker', 'label': 'Ticker', 'type': 'ticker'},
+            {'id': 'shares','label': 'Shares', 'type': 'input'},
+            {'id': 'price', 'label': 'Avg Price (base)', 'type': 'input'},
+            {'id': 'price_eur', 'label': 'Avg Price (€)', 'type': 'finance', 'suffix': ' €'},
             {'id': 'market_value', 'label': 'Value (€)', 'type': 'finance', 'suffix': ' €'},
-            {'id': 'quote',     'label': 'Quote',       'type': 'finance'},
-            {'id': 'quote_eur', 'label': 'Quote (€)',   'type': 'finance', 'suffix': ' €'},
-            {'id': 'weight',    'label': 'Weight',      'type': 'monitor', 'suffix': '%'},
+            {'id': 'quote', 'label': 'Quote', 'type': 'finance'},
+            {'id': 'quote_eur', 'label': 'Quote (€)', 'type': 'finance', 'suffix': ' €'},
+            {'id': 'weight', 'label': 'Weight', 'type': 'monitor', 'suffix': '%'},
         ]
 
         # Category-specific columns
@@ -165,7 +183,7 @@ class Asset(AssetData):
             ]
         else:
             schema += [
-                {'id': 'staking_yield', 'label': 'Staking yield', 'type': 'input', 'placeholder': '0.05'}
+                {'id': 'syield', 'label': 'Staking yield', 'type': 'monitor_input', 'suffix': '%'}
             ]
         return schema
     
@@ -180,6 +198,7 @@ class Asset(AssetData):
         # Properties
         data.update({
             'market_value': self.market_value,
+            'price_eur': self.price_eur,
             'cost_basis': self.cost_basis,
             'annual_dividend': self.annual_dividend,
             'asset_income': self.asset_income,
@@ -200,7 +219,7 @@ class Portfolio:
         self.assets = assets
         self.update_weights()
 
-    @property
+    @cached_property
     def total_market_value(self):
         return sum(asset.market_value for asset in self.assets)
         
@@ -258,6 +277,14 @@ class Portfolio:
             div_yield = float(total_income / total_mv),
             div_growth = float(total_income_growth / total_income)
         )
+    
+    @property
+    def portfolio_syield(self):
+        total_mv = self.total_market_value
+        total_income = sum(asset.market_value * asset.syield for asset in self.assets)
+        if total_mv > 0:
+            return float(total_income / total_mv)
+
         
     @property
     def sectors(self):
@@ -286,7 +313,7 @@ class Portfolio:
             'div_growth': {'low': 4, 'high': 8, 'dir': 'high_is_better'},
             },
         'crypto':{
-            'staking_yield': {'low': 2, 'high': 4, 'dir': 'high_is_better'}
+            'syield': {'low': 2, 'high': 4, 'dir': 'high_is_better'}
         } 
     }
 
@@ -299,27 +326,27 @@ class Portfolio:
         asset_schema = self.assets[0].get_schema()
         
         if configs is None:
-            configs = {m: self.get_metric_config(m, asset_type) for m in ['div_yield', 'div_growth']}
+            configs = {m: self.get_metric_config(m, asset_type) for m in ['div_yield', 'div_growth', 'syield']}
 
         # Define which IDs in the schema should have footer values
         if asset_type == 'stocks':
             footer_map = {
-                'ticker':       {'label': 'Total Stocks', 'class': 'font-bold'},
-                'price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-stocks', 'type': 'finance'},
+                'ticker': {'label': 'Total Stocks', 'class': 'font-bold'},
+                'price_eur': {'val': self.total_cost_basis, 'id': 'total-cost-basis-stocks', 'type': 'finance'},
                 'market_value': {'val': self.total_market_value, 'id': 'total-market-value-stocks', 'type': 'finance'},
-                'div_yield':    {'val': configs['div_yield']['val'], 'id': 'portfolio-div-yield', 'type': 'monitor', 'suffix': '%',
+                'div_yield': {'val': configs['div_yield']['val'], 'id': 'portfolio-div-yield', 'type': 'monitor', 'suffix': '%',
                                     'bg_class': configs['div_yield']['class']},
-                'div_growth':   {'val': configs['div_growth']['val'], 'id': 'portfolio-div-growth', 'type': 'monitor', 'suffix': '%',
+                'div_growth': {'val': configs['div_growth']['val'], 'id': 'portfolio-div-growth', 'type': 'monitor', 'suffix': '%',
                                     'bg_class': configs['div_growth']['class']},
-                'months_paid':  {'type': 'visualizer'},
+                'months_paid': {'type': 'visualizer'},
                 'annual_dividend': {'val': self.annual_dividends, 'id': 'annual-dividends', 'type': 'finance', 'suffix': ' €'},
             }
         else:
             footer_map = {
-                'ticker':       {'label': 'Total Crypto', 'class': 'font-bold'},
-                'price':    {'val': self.total_cost_basis, 'id': 'total-cost-basis-crypto', 'type': 'finance'},
+                'ticker': {'label': 'Total Crypto', 'class': 'font-bold'},
+                'price_eur': {'val': self.total_cost_basis, 'id': 'total-cost-basis-crypto', 'type': 'finance'},
                 'market_value': {'val': self.total_market_value, 'id': 'total-market-value-crypto', 'type': 'finance'},
-                'staking_yield':{'label': "Avg: N/A%", 'type': 'monitor', 'suffix': '%'},
+                'syield':{'val': self.portfolio_syield, 'id': 'portfolio_syield', 'type': 'monitor', 'suffix': '%', 'bg_class': configs['syield']['class']},
             }
 
         resolved_footer = []
@@ -367,6 +394,7 @@ class Portfolio:
             'monthly_income_data': vars(self.monthly_income_data), # vars is used to extract dicts from object instance
             'annual_dividends': self.annual_dividends,
             'portfolio_yield_data': vars(self.portfolio_yield_data),
+            'portfolio_syield': self.portfolio_syield,
             'sectors': vars(self.sectors),
             'status_colors': {m: cfg['class'] for m, cfg in metric_configs.items()},
             'footer': self.get_footer(asset_type, metric_configs)
@@ -379,14 +407,20 @@ class Portfolio:
 class PortfolioLoader:
     @staticmethod
     def load_asset_data(asset_type):
-        return {
-            'shares': storage_utils.load_shares(asset_type),
-            'price': storage_utils.load_prices(asset_type),
-            'env': storage_utils.load_env(asset_type),
-            'soc': storage_utils.load_soc(asset_type),
-            'gov': storage_utils.load_gov(asset_type),
-            'cont': storage_utils.load_cont(asset_type)
+        manager = AssetDataManager(asset_type)
+        portfolio_mgr = PortfolioDataManager()
+        
+        asset_data = {
+            'shares': manager.get_data('shares'),
+            'price':  manager.get_data('price'),
+            'env':    manager.get_data('env'),
+            'soc':    manager.get_data('soc'),
+            'gov':    manager.get_data('gov'),
+            'cont':   manager.get_data('cont'),
+            'syield': manager.get_data('syield'),
+            'fx_rates': portfolio_mgr.get_forex_rates()
         }
+        return asset_data
 
 
 # Define the complete portfolio
@@ -479,16 +513,16 @@ class PortfolioManager:
     
     @classmethod
     @timed
-    def from_storage(cls, asset_classes, storage_utils, finance_managers, interval='1d', force_update=False):
+    def from_storage(cls, asset_classes, finance_managers, interval='1d', force_update=False):
         # Build a PortfolioManager
         portfolios = {}
         
         for asset_type in asset_classes:
-            # Get the list of tickers
-            tickers = storage_utils.get_assets(asset_type) 
-            manager = finance_managers[asset_type]
+            dm = AssetDataManager(asset_type)
+            tickers = dm.tickers
+            fm = finance_managers[asset_type]
             # Fetch metrics
-            raw_metrics = manager.get_metrics(
+            raw_metrics = fm.get_metrics(
                 tickers, interval=interval, force=force_update
             )
             
@@ -506,36 +540,40 @@ class PortfolioManager:
                     env=data['env'].get(t, 0),
                     soc=data['soc'].get(t, 0),
                     gov=data['gov'].get(t, 0),
-                    cont=data['cont'].get(t, 0)
+                    cont=data['cont'].get(t, 0),
+                    syield=data['syield'].get(t, 0),
+                    fx_rates=data['fx_rates']
                 ) for t in tickers
             ]
             
             portfolios[asset_type] = Portfolio(assets)
             
-        free_cash = storage_utils.load_cash()
+        free_cash = PortfolioDataManager().get_cash()
         return cls(portfolios, free_cash=free_cash)
     
     @classmethod
-    def from_cache(cls, asset_classes, storage_utils, finance_managers):
+    def from_cache(cls, asset_classes, finance_managers):
         """
         Rebuild portfolio from already-cached metrics. 
-        No network calls, no staleness checks — pure math.
+        No network calls, no staleness checks.
         """
         portfolios = {}
         for asset_type in asset_classes:
-            tickers = storage_utils.get_assets(asset_type)
-            manager = finance_managers[asset_type]
+            dm = AssetDataManager(asset_type)
+            tickers = dm.tickers
+        
+            fm = finance_managers[asset_type]
             
             # Read directly from in-memory cache, fall back to disk JSON
-            if not manager._static_metrics:
-                manager._static_metrics = manager._load_json(
-                    manager._metrics_path, default={}
+            if not fm._static_metrics:
+                fm._static_metrics = fm._load_json(
+                    fm._metrics_path, default={}
                 )
             
             raw_metrics = [
-                manager._static_metrics[t] 
+                fm._static_metrics[t] 
                 for t in tickers 
-                if t in manager._static_metrics
+                if t in fm._static_metrics
             ]
             
             data = PortfolioLoader.load_asset_data(asset_type)
@@ -549,12 +587,14 @@ class PortfolioManager:
                     env=data['env'].get(t, 0),
                     soc=data['soc'].get(t, 0),
                     gov=data['gov'].get(t, 0),
-                    cont=data['cont'].get(t, 0)
-                ) for t in tickers if t in manager._static_metrics
+                    cont=data['cont'].get(t, 0),
+                    syield=data['syield'].get(t, 0),
+                    fx_rates=data['fx_rates']
+                ) for t in tickers if t in fm._static_metrics
             ]
             portfolios[asset_type] = Portfolio(assets)
 
-        free_cash = storage_utils.load_cash()
+        free_cash = PortfolioDataManager().get_cash()
         return cls(portfolios, free_cash=free_cash)
 
 
@@ -592,7 +632,7 @@ def get_metric_config(self, name, rule, asset_type):
 # Generic background colour function
 def calculate_color(value, low, high, direction='high_is_better'):
     """Python implementation of your Jinja color logic."""
-    if not isinstance(value, (int, float)) or value <= 0:
+    if not isinstance(value, (int, float)) or value < 0:
         return "bg-red"
     
     if direction == 'high_is_better':

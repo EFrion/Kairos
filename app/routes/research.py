@@ -140,15 +140,18 @@ class PortfolioDataAPI(MethodView):
                 theme = text_analyser.theme_dominance()
                 logger.info(f"Themes dominating:\n{theme}")
 
-                sentiment = text_analyser.cluster_sentiment()
-                if sentiment.empty:
-                    logger.warning(f"No sentiment signal for {ticker} — insufficient headlines")
+                lexicon_sentiment = text_analyser.cluster_sentiment()
+                finbert_sentiment = text_analyser.cluster_sentiment_finbert()
+
+                if lexicon_sentiment.empty and finbert_sentiment.empty:
+                    logger.warning(f"No sentiment signal for {ticker}: insufficient headlines")
                     return jsonify({
                         "warning": f"Insufficient headlines for {ticker} to produce sentiment signal.",
                         "fig_data": None
                     }), 200
                 else:
-                    logger.info(f"\nSentiment: {sentiment}")
+                    logger.info(f"Lexicon sentiment:\n{lexicon_sentiment}")
+                    logger.info(f"FinBERT sentiment:\n{finbert_sentiment}")
                 fig = plotting_utils.create_lsa_scatter(news_df)
             except Exception as e:
                 logger.error(f"[NEWS] LSA failed for {ticker}: {e}")
@@ -191,7 +194,7 @@ def _build_figure(mode, analyser, force_update):
     if mode == 'heatmap':
         return plotting_utils.plot_correlation_heatmap(analyser.percent_correlation_matrix)
     elif mode == 'returns':
-        return plotting_utils.create_returns_distribution_chart(analyser.percent_returns)
+        return plotting_utils.create_returns_distribution_chart(analyser.weighted_returns)
     elif mode == 'efficient_frontier':
         results = _get_frontier(analyser, force_update)
         return plotting_utils.plot_efficient_frontier_and_portfolios(results, analyser.asset_analysers)

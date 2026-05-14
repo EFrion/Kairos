@@ -1,17 +1,8 @@
-<!doctype html>
-<head>
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
-</head>
-
-<title>{{ title }}</title>
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %} 
 
 <body>
-    <div class="nav">
-        <a href="/cashflow">Cash flow</a>
-        <a href="/portfolio">Portfolio</a>
-        <a href="/research">Research</a>
-    </div>
-
+    {% block content %}
     <h1>{{ title }}</h1>
     
     <div class="chart-container">
@@ -374,5 +365,6 @@
             window.portfolioApp = new PortfolioApp();
         });
     </script>
+    {% endblock %}
 </body>
 

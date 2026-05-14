@@ -84,8 +84,9 @@ class FinanceDataManager:
     #  Public interface                                                    #
     # ------------------------------------------------------------------ #
     @timed
-    def get_metrics(self, tickers: list[str], interval="4h", force=False) -> list[dict]:
+    def get_metrics(self, tickers: list[str], interval: str, force=False) -> list[dict]:
         """Main entry point. Returns metrics list for the requested tickers."""
+        logger.debug(f"get_metrics called for interval {interval}, type(self)={type(self)}")
         self._ensure_fx_rates()
         self._ensure_prices(tickers, interval, force)
         return self._ensure_metrics(tickers, interval, force)
@@ -163,24 +164,29 @@ class FinanceDataManager:
     @timed
     def _ensure_prices( self, tickers: list[str], interval: str,
                         force: bool = False, target_start: datetime = None) -> None:
+        logger.debug(f"[_ensure_prices] interval={interval}, tickers={tickers}")
         if interval not in self._hist_prices:
             df = self._load_csv(self._get_price_path(interval))
-            self._hist_prices[interval] = self._normalize_tz(df)  # point 2
+            self._hist_prices[interval] = self._normalize_tz(df)
+            logger.debug(f"[_ensure_prices] loaded CSV, columns={list(df.columns)}")
 
         df = self._hist_prices[interval]
+        logger.debug(f"[_ensure_prices] cached df columns={list(df.columns)}")
 
         new_tickers = [t for t in tickers if t not in df.columns]
+        logger.debug(f"[_ensure_prices] new_tickers={new_tickers}")
         if new_tickers:
-            df = self._add_tickers(df, new_tickers, interval)      # point 1
+            df = self._add_tickers(df, new_tickers, interval)
+            logger.debug(f"[_ensure_prices] after _add_tickers, columns={list(df.columns)}")
 
         if target_start:
             df = self._backfill_if_needed(df, target_start,
-                                        tickers, interval)       # point 3
+                                        tickers, interval)
 
-        if self._is_stale(df, interval) or force:                  # points 4 & 5
-            df = self._refresh(df, tickers, interval)              # point 6
+        if self._is_stale(df, interval) or force: 
+            df = self._refresh(df, tickers, interval)
 
-        if df is not self._hist_prices[interval]:                  # only write if changed
+        if df is not self._hist_prices[interval]: # only write if changed
             self._save_csv(df, interval)
             self._hist_prices[interval] = df
         
@@ -210,22 +216,28 @@ class FinanceDataManager:
 
         # Always inject fresh quote from price cache
         df = self._hist_prices.get(interval, pd.DataFrame())
-        result = []
+        quotes_changed = False
         for ticker in tickers:
-            entry = dict(self._static_metrics[ticker])
+            if ticker not in self._static_metrics:
+                continue
             if not df.empty and ticker in df.columns:
                 last_price = float(df[ticker].dropna().iloc[-1])
-                currency = entry.get("Currency", "EUR")
+                currency = self._static_metrics[ticker].get("Currency", "EUR")
                 rate = self._usd_eur if currency == 'USD' else \
                     self._chf_eur if currency == 'CHF' else 1.0
-                entry["Quote"]     = last_price
-                entry["Quote_EUR"] = round(last_price * rate, 4)
-            result.append(entry)
+                if rate:
+                    self._static_metrics[ticker]["Quote"]     = last_price
+                    self._static_metrics[ticker]["Quote_EUR"] = round(last_price * rate, 4)
+                    quotes_changed = True
 
-        return result
+        if quotes_changed:
+            self._save_json(self._metrics_path, self._static_metrics)
+
+        return [self._static_metrics[t] for t in tickers if t in self._static_metrics]
 
     ### Workers
     def _add_tickers(self, df: pd.DataFrame, new_tickers: list[str], interval: str) -> pd.DataFrame:
+        logger.debug(f"[_add_tickers] downloading {new_tickers} at {interval}")
         start = df.index.min() if not df.empty else datetime.now() - self.INTERVAL_MAX_LOOKBACK.get(interval, timedelta(days=59))
         new_prices = self._download_prices(new_tickers, interval, start, datetime.now())
         return self._merge(new_prices, df)
