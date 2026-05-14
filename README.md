@@ -1,5 +1,5 @@
 # Kairos
-_Last updated: 2026-04-29_
+_Last updated: 2026-05-14_
 
 
 ## Finance platform for portfolio monitoring and quantitative research.
