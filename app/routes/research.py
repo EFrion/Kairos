@@ -1,5 +1,5 @@
 from flask import Blueprint, render_template, request, jsonify, current_app
-from app.utils import plotting_utils, storage_utils
+from app.utils import plotting_utils
 from app.models import PortfolioManager
 from app.analytics.optimiser import PortfolioOptimiser
 from app.analytics.analyser import PortfolioAnalyser
@@ -56,7 +56,6 @@ class PortfolioView(MethodView):
 
         portfolio = PortfolioManager.from_cache(
             asset_classes=['stocks'],
-            storage_utils=storage_utils,
             finance_managers=finance_managers,
         )
         analyser = PortfolioAnalyser(
