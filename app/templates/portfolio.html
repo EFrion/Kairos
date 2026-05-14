@@ -1,28 +1,11 @@
-<!doctype html>
-<head>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-
-<title>{{ title }}</title>
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %} 
 {% import 'macros.html' as utils %}
 
 <body>
+    {% block content %}
     <div id="ticker-list" data-tickers="{{ metrics|map(attribute='Ticker')|join(',') }}"></div>
-    
-    <div class="nav">
-        <a href="/cashflow">Cash Flow</a>
-        <a href="/portfolio">Portfolio</a>
-        <a href="/research">Research</a>
-        
-        <div style="float: right; margin-right: 20px; position: relative;">
-            <button type="button" id="bellBtn">
-                🔔 <span id="bell-badge" style="display:none;">0</span>
-            </button>
-            <ul id="notification-list"
-                style="width: 320px; display: none; position: absolute; right:0; left: auto; z-index: 9999; background: white; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #ddd;">
-            </ul>
-        </div>
-    </div>
+    <div id="loader" class="loader hidden"></div>
 
     <h1>{{ title }}</h1>
     
@@ -45,7 +28,6 @@
             </span>
         </div>
 
-        
         <div id="asset-allocation-chart" style="flex: 1; height: auto; min-width: 300px; margin: 0px;"></div>
         
         <div id="sector-chart" style="flex: 1; height: auto; min-width: 300px; margin: 0px;"></div>
@@ -54,19 +36,23 @@
     <form method="POST" action="{{ url_for('portfolio.portfolio_feature') }}">
         {% for asset_type in ['stocks', 'crypto'] %}
             {% set port = portfolio[asset_type] %}
-            {% call(part) utils.table_container(asset_type|capitalize ~ ' Portfolio', asset_type) %}
-                {% if part == 'header' %}
-                    <tr>
-                        {% for col in port.assets[0].get_schema() %}
-                            <th>{{ col.label }}</th>
-                        {% endfor %}
-                    </tr>
-                {% elif part == 'body' %}
-                    {% for asset in port.assets %} {{ utils.asset_row(asset) }} {% endfor %}
-                {% elif part == 'footer' %}
-                    {{ utils.render_footer(port, asset_type) }}
-                {% endif %}
-            {% endcall %}
+            {% if port.assets|length > 0 %}
+                {% call(part) utils.table_container(asset_type|capitalize ~ ' Portfolio', asset_type) %}
+                    {% if part == 'header' %}
+                        <tr>
+                            {% for col in port.assets[0].get_schema() %}
+                                <th>{{ col.label }}</th>
+                            {% endfor %}
+                        </tr>
+                    {% elif part == 'body' %}
+                        {% for asset in port.assets %} {{ utils.asset_row(asset) }} {% endfor %}
+                    {% elif part == 'footer' %}
+                        {{ utils.render_footer(port, asset_type) }}
+                    {% endif %}
+                {% endcall %}
+            {% else %}
+                <p>No assets found in this category.</p>
+            {% endif %}
         {% endfor %}
     </form>
 
@@ -104,7 +90,7 @@
             {{ income_plot|safe }}
         </div>
     {% endif %}
-    
+
     <script>
         window.INITIAL_PORTFOLIO_DATA = {
             portfolio: {{ portfolio.to_dict() | tojson }}
@@ -154,10 +140,11 @@
                 const socInput = document.querySelector(`input[name="soc_${ticker}"]`);
                 const govInput = document.querySelector(`input[name="gov_${ticker}"]`);
                 const contInput = document.querySelector(`input[name="cont_${ticker}"]`);
-
+                const syieldInput = document.querySelector(`input[name="syield_${ticker}"]`);
+                console.log("exists: `${syieldInput}`");
                 if (sharesInput) {
-                    // Default ESG values to 0
-                    let envVal = 0, socVal = 0, govVal = 0, contVal;
+                    // Default values to 0
+                    let envVal = 0, socVal = 0, govVal = 0, contVal= 0, syieldVal=0;
                     
                     // Only attempt to read ESG values if assetType is 'stocks'
                     if (assetType === 'stocks') {
@@ -166,16 +153,22 @@
                         govVal = govInput ? (parseInt(govInput.value) || 0) : 0;
                         contVal = contInput ? (parseInt(contInput.value) || 0) : 0;
                     }
+
+                    // Only attempt to read staking yields if assetType is 'crypto'
+                    if (assetType === 'crypto') {
+                        syieldVal = syieldInput ? (parseInt(syieldInput.value) || 0) : 0;
+                    }
             
                     assets.push({
                         ticker: ticker,
-                        shares: parseFloat(sharesInput.value) || 0.0,
+                        shares: sharesInput ? (parseFloat(sharesInput.value) || 0.0) : 0.0,
                         price: priceInput ? (parseFloat(priceInput.value) || 0.0) : 0.0,
                         // Check if ESG inputs exist before accessing .value
                         env: envVal,
                         soc: socVal,
                         gov: govVal,
-                        cont: contVal
+                        cont: contVal,
+                        syield: syieldInput ? (parseFloat(syieldInput.value) || 0.0) : 0.0,
                     });
                 }
                 
@@ -189,6 +182,10 @@
         function updatePortfolioUI(assetType, ticker = null, externalData = null) {
             console.log(`updatePortfolioUI called for ${assetType}`);
             
+            if (PortfolioUI.dom.loader) {
+                PortfolioUI.dom.loader.classList.remove('hidden');
+            }
+
             if (externalData) {
                 console.log("Using external data to update UI.");
                 PortfolioUI.update({ portfolio: externalData }, assetType);
@@ -219,6 +216,7 @@
                 portfolioUpdateController = null;
             })                
             .catch(error => {
+                if (PortfolioUI.dom.loader) PortfolioUI.dom.loader.classList.add('hidden');
                 // Handle the abort specifically so it doesn't clutter console with "Errors"
                 if (error.name === 'AbortError') {
                     console.log('Fetch aborted: newer input received.');
@@ -229,7 +227,9 @@
         }
         
         const PortfolioUI = {
+            dom: {},
             init() {
+                this.dom = {loader: document.getElementById('loader')}
                 this.setupListeners();
                 this.hydrateInitialData();
             },
@@ -276,6 +276,7 @@
             update(data, assetType, ticker = null) {
                 if (!data || !data.portfolio) {
                     console.error("Data structure invalid", data);
+                    if (this.dom.loader) this.dom.loader.classList.add('hidden');
                     return;
                 }
 
@@ -326,6 +327,8 @@
 
                 // Post-update logic
                 this.monitorStatusChanges();
+
+                if (this.dom.loader) {this.dom.loader.classList.add('hidden');}
             },
 
             setCellColor(id, bgClass) {
@@ -472,12 +475,6 @@
             
             updatePieChart('asset-allocation-chart', labels, values, 'Global allocation');
             
-            // Update the grand total text at the top
-            const grandTotal = values.reduce((a, b) => a + b, 0);
-            const grandTotalElem = document.getElementById('grand-total-display');
-            if (grandTotalElem) grandTotalElem.textContent = currencyFormat(grandTotal);
-            console.log("grandTotalElem: ", grandTotalElem);
-            
             if (sectorLabels && sectorValues) {
                 updatePieChart('sector-chart', sectorLabels, sectorValues, 'Sector diversification');
             }
@@ -538,12 +535,15 @@
 
         // Function to send a single updated value (shares or price) to the server
         function saveSingleValue(inputElement, ticker, value) {
-            //console.log("saveSingleValue called");
+            console.log("saveSingleValue called");
+            if (PortfolioUI.dom.loader) PortfolioUI.dom.loader.classList.remove('hidden');
+
             const fieldType = inputElement.id.split('_')[0]; // Remove underscore to get the field
             
             // Determine the asset type by looking at the parent container
             const assetType = inputElement.closest('[id$="-section"]').id.split('-')[0]; // Return 'stocks' or 'crypto'
     
+            console.log(`${assetType}`);
             return fetch(`/save_single_value/${assetType}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -556,6 +556,7 @@
             })
             .then(response => response.json())
             .catch(error => {
+                if (PortfolioUI.dom.loader) PortfolioUI.dom.loader.classList.add('hidden');
                 console.error('Error saving value:', error);
                 return { status: 'error' };
             });
@@ -584,15 +585,12 @@
         }
         
         function saveCashValue(value) {
-            fetch('/save_cash', {
+            return fetch('/save_cash', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ cash: value })
             })
             .then(response => response.json())
-            .then(data => {
-                //console.log("Cash saved successfully:", data.saved_value);
-            })
             .catch(error => console.error('Error saving cash:', error));
         }
         
@@ -864,6 +862,8 @@
 
             sync() {
                 console.log("SyncManager: syncing at", new Date().toLocaleTimeString());
+                if (PortfolioUI.dom.loader) PortfolioUI.dom.loader.classList.remove('hidden');
+                
                 fetch('/update_portfolio_cache', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
@@ -876,7 +876,10 @@
                     console.log("SyncManager: sync complete.");
                     PortfolioUI.update(data, 'stocks');
                 })
-                .catch(err => console.error("SyncManager: sync failed:", err));
+                .catch(err => {
+                    console.error("SyncManager: sync failed:", err);
+                    if (PortfolioUI.dom.loader) PortfolioUI.dom.loader.classList.add('hidden');  // hide on error
+                });
             }
         };
 
@@ -902,8 +905,19 @@
             if (freeCashInput) {
                 // Deliberate saving: Save only when finish typing
                 freeCashInput.addEventListener('change', (e) => {
-                    saveCashValue(e.target.value); 
-                    updatePortfolioUI('stocks');
+                    saveCashValue(e.target.value)
+                        .then(() => {
+                            // Refresh portfolio totals after cash update
+                            return fetch('/update_portfolio_data', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        })
+                        .then(res => res.json())
+                        .then(data => {
+                            PortfolioUI.update(data, 'stocks');
+                        })
+                        .catch(err => console.error('Cash update failed:', err));
                 });
                 
                 freeCashInput.addEventListener('keydown', (e) => {
@@ -915,4 +929,6 @@
         });
     </script>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+
+    {% endblock %}
 </body>

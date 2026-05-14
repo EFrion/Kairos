@@ -28,7 +28,7 @@
         data-metric="{{ metric_key }}">
         
         {% if is_input %}
-            {{ render_input(asset.ticker, metric_key, config.val) }}
+            {{ render_input(asset.ticker, metric_key, config.val) }}{{ suffix }}
         {% else %}
             {{ prefix }}{{ config.val | format_finance }}{{ suffix }}
         {% endif %}
@@ -70,7 +70,7 @@
         {% elif col.type == 'monitor' %}
             {{ monitor_cell(asset, col.id, suffix=col.suffix) }}
         {% elif col.type == 'monitor_input' %}
-            {{ monitor_cell(asset, col.id, is_input=True) }}
+            {{ monitor_cell(asset, col.id, is_input=True, suffix=col.suffix) }}
         {% elif col.type == 'visualizer' %}
             <td class="month-visualizer-cell">
                 <div class="month-container">

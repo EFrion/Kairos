@@ -14,8 +14,9 @@ from pytrends.exceptions import TooManyRequestsError
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import yfinance as yf
-import feedparser
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import torch.nn.functional as F
 import logging
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ class TextAnalyser:
         'overextended'
     }
     SPLIT_THRESHOLD = -0.15
+    FINBERT_MODEL = "ProsusAI/finbert"
+    FINBERT_LABELS = ["positive", "negative", "neutral"]
 
     def __init__(self, documents: list[str],
                  n_components: int = None,
@@ -61,6 +64,9 @@ class TextAnalyser:
         self._stop_words = set(stopwords.words('english'))
         self.n_components = n_components
         self.variance_threshold = variance_threshold
+        self._finbert_tokenizer = None
+        self._finbert_model = None
+        self._headline_scores_cache: pd.DataFrame | None = None
 
         # LSA. Focuses on the local importance of words within a document.
         self._vectorizer = CountVectorizer(
@@ -83,6 +89,57 @@ class TextAnalyser:
     # ------------------------------------------------------------------ #
     # Public interface                                                   #
     # ------------------------------------------------------------------ #
+
+    def headline_sentiment(self, batch_size: int = 8) -> pd.DataFrame:
+        """
+        Score each headline with FinBERT.
+        Returns DataFrame indexed by headline with columns:
+        positive, negative, neutral, compound, label.
+        compound = positive - negative ∈ [-1, 1].
+        Cached for the lifetime of the TextAnalyser instance.
+        """
+        if self._headline_scores_cache is not None:
+            return self._headline_scores_cache
+
+        self._load_finbert()
+        cleaned = [self._preprocess_for_finbert(d) for d in self._documents]
+        results = []
+
+        for i in range(0, len(cleaned), batch_size):
+            batch = cleaned[i:i + batch_size]
+            original = self._documents[i:i + batch_size]
+
+            inputs = self._finbert_tokenizer(
+                batch,
+                padding=True,
+                truncation=True,   # hard BERT limit
+                max_length=512,
+                return_tensors='pt'
+            )
+            with torch.no_grad():
+                logits = self._finbert_model(**inputs).logits
+
+            probs = F.softmax(logits, dim=-1).numpy()
+
+            for j, doc in enumerate(original):
+                pos  = float(probs[j][0])
+                neg  = float(probs[j][1])
+                neu  = float(probs[j][2])
+                comp = round(pos - neg, 4)
+                label = self.FINBERT_LABELS[int(probs[j].argmax())]
+                results.append({
+                    'headline': doc,
+                    'positive': round(pos, 4),
+                    'negative': round(neg, 4),
+                    'neutral':  round(neu, 4),
+                    'compound': comp,
+                    'label':    label
+                })
+
+        df = pd.DataFrame(results).set_index('headline')
+        self._headline_scores_cache = df
+        logger.info(f"[FinBERT] Scored {len(df)} headlines")
+        return df
 
     @property
     def term_document_matrix(self) -> pd.DataFrame:
@@ -112,6 +169,75 @@ class TextAnalyser:
         if self._clusters_cache is None:
             self._clusters_cache = self._compute_clusters()
         return self._clusters_cache
+    
+
+    def cluster_sentiment_finbert(self, min_dominance: int = 2,
+                                   exclude_general: bool = True) -> pd.DataFrame:
+        """
+        Aggregate FinBERT headline scores by cluster.
+        Returns a DataFrame with mean sentiment scores per cluster.
+        """
+        scores = self.headline_sentiment()          # headlines x scores
+        assignments = self.clusters()               # terms -> cluster
+        dominance = self.theme_dominance()
+        tdm = self.term_document_matrix             # terms x docs
+
+        # Filter clusters by dominance
+        significant = dominance[dominance >= min_dominance].index
+        if exclude_general:
+            significant = significant[significant != 'Component_1']
+
+        results = []
+        for cluster_name in significant:
+            cluster_terms = assignments[
+                assignments == cluster_name
+            ].index.tolist()
+
+            # Find docs that contain at least one term from this cluster
+            cluster_tdm = tdm.loc[cluster_terms]
+            doc_mask = (cluster_tdm > 0).any(axis=0)
+            contributing_docs = tdm.columns[doc_mask].tolist()
+
+            if not contributing_docs:
+                continue
+
+            # Map doc indices to headline strings
+            # tdm columns are integers (0-based doc indices)
+            cluster_headlines = [
+                self._documents[i] for i in contributing_docs
+                if i < len(self._documents)
+            ]
+
+            # Average FinBERT scores for contributing headlines
+            cluster_scores = scores.loc[
+                scores.index.isin(cluster_headlines)
+            ]
+            if cluster_scores.empty:
+                continue
+
+            mean_compound = cluster_scores['compound'].mean()
+            label = ('bullish' if mean_compound > 0.05
+                     else 'bearish' if mean_compound < -0.05
+                     else 'neutral')
+
+            results.append({
+                'cluster':         cluster_name,
+                'compound':        round(mean_compound, 4),
+                'mean_positive':   round(cluster_scores['positive'].mean(), 4),
+                'mean_negative':   round(cluster_scores['negative'].mean(), 4),
+                'mean_neutral':    round(cluster_scores['neutral'].mean(), 4),
+                'label':           label,
+                'dominance':       int(dominance[cluster_name]),
+                'n_headlines':     len(cluster_scores),
+                'headlines':       cluster_headlines
+            })
+
+        if not results:
+            return pd.DataFrame()
+
+        return (pd.DataFrame(results)
+                  .set_index('cluster')
+                  .sort_values('compound', ascending=False))
     
     def cluster_sentiment(  self, min_dominance: int = 2, 
                             exclude_general: bool = True) -> pd.DataFrame:
@@ -267,10 +393,44 @@ class TextAnalyser:
         self._lsa_cache = {}
         self._token_sets = None
         self._clusters_cache = None
+        self._headline_scores_cache = None
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
+
+    def _load_finbert(self) -> None:
+        """Lazy load on first FinBERT call."""
+        if self._finbert_model is not None:
+            return
+        logger.info("[FinBERT] Loading model...")
+        self._finbert_tokenizer = AutoTokenizer.from_pretrained(
+            self.FINBERT_MODEL
+        )
+        self._finbert_model = AutoModelForSequenceClassification.from_pretrained(
+            self.FINBERT_MODEL
+        )
+        self._finbert_model.eval()
+        logger.info("[FinBERT] Model loaded.")
+
+    @staticmethod
+    def _preprocess_for_finbert(text: str) -> str: # TODO Only one preprocess needed
+        """
+        Clean text for FinBERT: strip social media artifacts.
+        Financial RSS headlines rarely have these, but handles edge cases.
+        """
+        if not text:
+            return ""
+        tokens = []
+        for t in text.split():
+            if t.startswith('#') and len(t) > 1:
+                continue  # remove hashtags
+            if t.startswith('@') and len(t) > 1:
+                continue  # remove usernames
+            if t.startswith('http'):
+                continue  # remove URLs
+            tokens.append(t)
+        return " ".join(tokens)
 
     def _compute_lsa(self) -> pd.DataFrame:
         n = self.n_components if self.n_components is not None else self._optimal_components()
@@ -398,8 +558,13 @@ class AssetAnalyser:
 
         # Only build price-based attributes if data provided
         if price_history is not None:
-            self.data = price_history[asset.ticker].dropna()
-            self.percent_returns = self.data.pct_change().dropna()
+            if asset.ticker in price_history.columns:
+                self.data = price_history[asset.ticker].dropna()
+                self.percent_returns = self.data.pct_change().dropna()
+            else:
+                logger.warning(f"No price data for {asset.ticker}")
+                self.data = None
+                self.percent_returns = None
         else:
             self.data = None
             self.percent_returns = None
@@ -641,26 +806,28 @@ class PortfolioAnalyser:
         self.portfolio = portfolio
         self._news_manager = news_manager
         self.tickers = [a.ticker for a in portfolio.assets]
-        
+    
         if price_history is not None:
-            self.data = price_history[self.tickers].dropna()
-            self.returns = self.data.pct_change().dropna()
+            available = [t for t in self.tickers if t in price_history.columns]
+            if missing := [t for t in self.tickers if t not in price_history.columns]:
+                logger.warning(f"Missing price data for: {missing}")
+            self.data = price_history[available].dropna()  # portfolio-level, for correlation/frontier
+            self._percent_returns = self.data.pct_change().dropna()
         else:
             self.data = None
-            self.returns = None
+            self._percent_returns = None
         self.ann_factor = 252
         self.risk_free_rate = risk_free_rate
 
-        self.asset_analysers = self._build_asset_analysers()
+        self.asset_analysers = self._build_asset_analysers(price_history)
 
     @timed
-    def _build_asset_analysers(self):
+    def _build_asset_analysers(self, price_history: pd.DataFrame = None) -> dict:
         analysers = {}
-
         for asset in self.portfolio.assets:
             analysers[asset.ticker] = AssetAnalyser(
-                asset,
-                self.data,
+                asset=asset,
+                price_history=price_history,
                 news_manager=self._news_manager,
                 variance_threshold=self.variance_threshold
             )
@@ -670,11 +837,13 @@ class PortfolioAnalyser:
     @property
     def individual_annual_returns(self):
         if self.data is None:
-            raise ValueError(
-                f"Price history required"
-            )
-        """Returns a numpy array of annual returns for all assets in the portfolio."""
-        return np.array([a.annual_return for a in self.asset_analysers.values()])
+            raise ValueError("Price history required")
+        available = self._percent_returns.columns.tolist()
+        return np.array([
+            self.asset_analysers[t].annual_return 
+            for t in available
+            if t in self.asset_analysers
+        ])
 
     @timed
     def get_optimisation_inputs(self):
@@ -683,12 +852,13 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
+        available = self._percent_returns.columns.tolist()
         return {
             "annual_returns": self.individual_annual_returns,
             "covariance_matrix": self.ann_covariance_matrix.values,
-            "initial_weights": self.current_weights,
-            "tickers": self.tickers,
-            "daily_returns": self.returns,
+            "initial_weights": self._get_available_weights(),
+            "tickers": available,
+            "daily_returns": self._percent_returns,
             "risk_free_rate": self.risk_free_rate
         }
 
@@ -702,12 +872,17 @@ class PortfolioAnalyser:
         return np.array([a.weight / 100 for a in self.portfolio.assets])
 
     @property
-    def percent_returns(self):
+    def percent_returns(self) -> pd.DataFrame | None:
+        """Raw returns matrix for all available tickers."""
         if self.data is None:
-            raise ValueError(
-                f"Price history required"
-            )
-        return self.returns @ self.current_weights
+            raise ValueError("Price history required")
+        return self._percent_returns  # just return the matrix, no weighting
+
+    @property
+    def weighted_returns(self) -> pd.Series | None:
+        if self.data is None:
+            return None
+        return self._percent_returns @ self._get_available_weights()
     
     @property
     def log_returns(self):
@@ -715,7 +890,7 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        return get_log_returns(self.percent_returns)
+        return get_log_returns(self.weighted_returns)
     
     @property
     def ann_log_returns(self):
@@ -731,7 +906,7 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        geometric_mean = ((1+self.percent_returns).prod()**(1/len(self.percent_returns)))-1  
+        geometric_mean = ((1+self.weighted_returns).prod()**(1/len(self.weighted_returns)))-1  
         return (1+geometric_mean)**self.ann_factor - 1
 
     @property
@@ -740,7 +915,7 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        return self.returns.corr()
+        return self._percent_returns.corr()
 
     @property
     def correlation_matrix(self):
@@ -756,21 +931,22 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        return self.returns.cov() * self.ann_factor
+        return self._percent_returns.cov() * self.ann_factor
     
     @property
     def variance(self):
-        if self.data is None:
+        if self._percent_returns is None:
             raise ValueError(
-                f"Price history required"
+                f"No returns available"
             )
-        return self.current_weights.T @ self.returns.cov() @ self.current_weights
+        w = self._get_available_weights()
+        return w.T @ self._percent_returns.cov() @ w
         
     @property
     def std(self):
-        if self.data is None:
+        if self._percent_returns is None:
             raise ValueError(
-                f"Price history required"
+                f"No returns available"
             )
         return np.sqrt(self.variance)
     
@@ -780,7 +956,7 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        return sharpe_ratio(self.percent_returns, self.risk_free_rate)
+        return sharpe_ratio(self.weighted_returns, self.risk_free_rate)
 
     @property
     def sortino_ratio(self):
@@ -788,7 +964,7 @@ class PortfolioAnalyser:
             raise ValueError(
                 f"Price history required"
             )
-        return sortino_ratio(self.percent_returns, self.risk_free_rate)
+        return sortino_ratio(self.weighted_returns, self.risk_free_rate)
     
     @timed
     def get_individual_metrics_data(self):
@@ -952,6 +1128,16 @@ class PortfolioAnalyser:
         """
         portfolio_daily_returns = daily_returns_df_slice.dot(weights)
         return portfolio_daily_returns.kurtosis()
+    
+    def _get_available_weights(self) -> np.ndarray:
+        """Weights renormalised to only available tickers."""
+        available = self._percent_returns.columns.tolist()
+        weights_series = pd.Series(self.current_weights, index=self.tickers)
+        available_weights = weights_series[weights_series.index.isin(available)]
+        total = available_weights.sum()
+        if total == 0:
+            return np.ones(len(available)) / len(available)
+        return (available_weights / total).values
         
 
 # Standalone functions

@@ -5,7 +5,7 @@ from scipy.optimize import minimize
 class PortfolioOptimiser:
     def __init__(self, analyser):
         self.analyser = analyser
-        self.returns = analyser.individual_annual_returns
+        self.percent_returns = analyser.individual_annual_returns
         self.cov = analyser.ann_covariance_matrix.values
         self.rf = analyser.risk_free_rate
 
@@ -173,12 +173,12 @@ class PortfolioOptimiser:
     
     def build_capital_market_line(self, bounds, constraints):
         # Find tangency portfolio
-        res = self.optimise_max_sharpe_ratio(self.returns, self.cov, bounds, constraints, self.rf)
+        res = self.optimise_max_sharpe_ratio(self.percent_returns, self.cov, bounds, constraints, self.rf)
         if not res.success:
             raise ValueError("Tangency portfolio optimisation failed")
 
         weights_tangency = res.x
-        ret_tangency = self.analyser.portfolio_return(weights_tangency, self.returns)
+        ret_tangency = self.analyser.portfolio_return(weights_tangency, self.percent_returns)
         vol_tangency = self.analyser.portfolio_volatility(weights_tangency, self.cov)
 
         # Generate multiples of the tangency portfolio risk
@@ -197,10 +197,10 @@ class PortfolioOptimiser:
     def perform_full_analysis(self, bounds, constraints):
         # Get basics
         static = self.perform_static_optimisation(
-            self.returns, self.cov, 
+            self.percent_returns, self.cov, 
             self.analyser.current_weights, 
             bounds, constraints, 
-            self.analyser.returns, self.rf
+            self.analyser.percent_returns, self.rf
         )
         
         # Get CML
