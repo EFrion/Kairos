@@ -156,7 +156,7 @@ def add_asset(asset_class):
             
             finance_manager.get_metrics(manager.tickers, interval=live_interval, force=False)
             logger.debug(f"[ADD_ASSET] get_metrics returned")
-    return '', 200
+    return jsonify({"status": "success", "message": "Ticker added"}), 200
   
 @bp.route('/delete/<asset_class>/<ticker>', methods=['POST'])
 def delete_asset(asset_class, ticker):

@@ -240,7 +240,7 @@ def expand_history():
     new_start = request.args.get('start')
     if not new_start:
         return jsonify({"message": "Missing start date"}), 400
-    logger.debug("new_start: ", new_start)
+    logger.debug(f"new_start: {new_start}")
 
     target_start = pd.to_datetime(new_start)
     finance = current_app.config['FINANCE_MANAGERS']['stocks']

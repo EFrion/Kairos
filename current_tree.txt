@@ -28,6 +28,7 @@
 │   │   ├── app.js
 │   │   └── style.css
 │   ├── templates
+│   │   ├── base.html
 │   │   ├── cashflow.html
 │   │   ├── macros.html
 │   │   ├── portfolio.html
@@ -38,11 +39,13 @@
 │       ├── config.py
 │       ├── database.py
 │       ├── finance_data.py
+│       ├── news_data.py
 │       ├── plotting_utils.py
 │       ├── __pycache__
 │       │   ├── config.cpython-312.pyc
 │       │   ├── database.cpython-312.pyc
 │       │   ├── finance_data.cpython-312.pyc
+│       │   ├── news_data.cpython-312.pyc
 │       │   ├── plotting_utils.cpython-312.pyc
 │       │   ├── storage_utils.cpython-312.pyc
 │       │   └── time_debug.cpython-312.pyc
@@ -58,29 +61,48 @@
 ├── config.py
 ├── current_tree.txt
 ├── data
-│   ├── crypto_cont.json
-│   ├── crypto_env.json
-│   ├── crypto_gov.json
-│   ├── crypto_list.json
+│   ├── AMAT_news.json
+│   ├── AMT_news.json
+│   ├── AMUN.PA_news.json
+│   ├── ARQQ_news.json
+│   ├── ASML.AS_news.json
+│   ├── BMO_news.json
+│   ├── BMW.DE_news.json
+│   ├── BNP.PA_news.json
+│   ├── COFB.BR_news.json
+│   ├── crypto_data.json
 │   ├── crypto_metrics_static.json
 │   ├── crypto_price_history_15m.csv
-│   ├── crypto_prices.json
-│   ├── crypto_shares.json
-│   ├── crypto_soc.json
+│   ├── CS.PA_news.json
+│   ├── DSY.PA_news.json
+│   ├── ES_news.json
 │   ├── frontier_cache.pkl
 │   ├── global_cash.json
+│   ├── INFQ_news.json
+│   ├── IONQ_news.json
+│   ├── ISP.MI_news.json
 │   ├── last_fetch_date.json
+│   ├── LRCX_news.json
+│   ├── MAN_news.json
+│   ├── MDT_news.json
+│   ├── MSI_news.json
+│   ├── NN.AS_news.json
+│   ├── NOVN.SW_news.json
+│   ├── NVDA_news.json
+│   ├── PIA.MI_news.json
+│   ├── PLD_news.json
+│   ├── PUB.PA_news.json
+│   ├── QBTS_news.json
+│   ├── S4VC.F_news.json
+│   ├── SAN.PA_news.json
 │   ├── sector_benchmarks.json
-│   ├── stocks_cont.json
-│   ├── stocks_env.json
-│   ├── stocks_gov.json
-│   ├── stocks_list.json
+│   ├── SLF_news.json
+│   ├── stocks_data.json
 │   ├── stocks_metrics_static.json
 │   ├── stocks_price_history_15m.csv
 │   ├── stocks_price_history_1d.csv
-│   ├── stocks_prices.json
-│   ├── stocks_shares.json
-│   ├── stocks_soc.json
+│   ├── TRN.MI_news.json
+│   ├── TT_news.json
 │   └── user_config.json
 ├── instance
 │   └── finance_app.db
@@ -95,4 +117,4 @@
 ├── README.md
 └── requirements.txt
 
-18 directories, 78 files
+18 directories, 100 files
