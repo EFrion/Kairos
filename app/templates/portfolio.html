@@ -100,9 +100,9 @@
         document.addEventListener('DOMContentLoaded', () => {
         
             console.log("Initial Data loaded:", window.INITIAL_PORTFOLIO_DATA);
-            window.portfolioApp = new PortfolioController(
+            new PortfolioController(
                 window.INITIAL_PORTFOLIO_DATA, 
-                {{ live_interval_ms }}
+                window.APP_CONFIG.liveIntervalMs
             );
         });
     </script>

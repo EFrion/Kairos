@@ -26,6 +26,12 @@
     <main>
         {% block content %}{% endblock %}
     </main>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script>
+        window.APP_CONFIG = {
+            liveIntervalMs:     {{ config['APP_CONFIG'].get('live_interval') | interval_to_ms }},
+            researchIntervalMs: {{ config['APP_CONFIG'].get('research_interval') | interval_to_ms }}
+        };
+    </script>
+    <script src="https://cdn.plot.ly/plotly-3.5.0.min.js"></script>
 </body>
 </html>

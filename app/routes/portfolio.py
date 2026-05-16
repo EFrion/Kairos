@@ -1,10 +1,9 @@
-from flask import Blueprint, render_template, request, session, redirect, url_for, jsonify, current_app
-import json
-import os
+from flask import Blueprint, render_template, request, session, jsonify, current_app
 from app.utils import plotting_utils
 from app.utils.storage_utils import AssetDataManager, PortfolioDataManager
 from app.models import PortfolioManager
 from app.utils.time_debug import timed
+from app.routes.api import _build_assets_payload
 import logging
 logger = logging.getLogger(__name__)
 
@@ -21,61 +20,52 @@ def portfolio_feature():
         'portfolio.html',
         title='Portfolio Dashboard',
         portfolio=data['portfolio'],
-        income_plot=data['income_plot'].to_html(full_html=False, include_plotlyjs='cdn'),
-        live_interval_ms=_interval_to_ms(app_config.get("live_interval"))
+        income_plot=data['income_plot'].to_html(full_html=False, include_plotlyjs='cdn')
     )
 
-@timed
-def get_portfolio_data(force_update=False):
-    interval = current_app.config['APP_CONFIG'].get("live_interval")
-    finance_managers = current_app.config['FINANCE_MANAGERS']
+# @timed
+# def get_portfolio_data(force_update=False):
+#     interval = current_app.config['APP_CONFIG'].get("live_interval")
+#     finance_managers = current_app.config['FINANCE_MANAGERS']
 
-    # TODO automatic asset classes handling
-    portfolio = PortfolioManager.from_storage(
-        asset_classes=['stocks', 'crypto'],
-        finance_managers=finance_managers,
-        interval=interval,
-        force_update=force_update
-    )
+#     # TODO automatic asset classes handling
+#     portfolio = PortfolioManager.from_storage(
+#         asset_classes=['stocks', 'crypto'],
+#         finance_managers=finance_managers,
+#         interval=interval,
+#         force_update=force_update
+#     )
 
-    income_plot = plotting_utils.create_income_plot(portfolio.total_income_data)
+#     income_plot = plotting_utils.create_income_plot(portfolio.total_income_data)
 
-    return {
-        'portfolio': portfolio,
-        'income_plot': income_plot
-    }
+#     return {
+#         'portfolio': portfolio,
+#         'income_plot': income_plot
+#     }
 
 
-def _interval_to_ms(interval: str) -> int:
-    """Convert interval string to milliseconds for JS polling."""
-    units = {"m": 60, "h": 3600, "d": 86400}
-    try:
-        value = int(interval[:-1])
-        unit = interval[-1]
-        return value * units[unit] * 1000
-    except (ValueError, KeyError):
-        return 15 * 60 * 1000  # fallback: 15 minutes
-
-# TODO remove this function?
-@bp.route('/update_portfolio_cache', methods=['POST'])
-@timed
-def update_portfolio_cache():
-    """ Loads cached data when app opens. """                       
-    data = get_portfolio_data()
+# # TODO remove this function?
+# @bp.route('/update_portfolio_cache', methods=['POST'])
+# @timed
+# def update_portfolio_cache():
+#     """ Loads cached data when app opens. """                       
+#     data = get_portfolio_data()
         
-    return jsonify({
-        'portfolio': data['portfolio'].to_dict(),
-        'income_plot': data['income_plot'].to_json()
-    })
+#     return jsonify({
+#         'portfolio': data['portfolio'].to_dict(),
+#         'income_plot': data['income_plot'].to_json()
+#     })
      
 @bp.route('/update_portfolio_data', methods=['POST'])
 def update_portfolio_data():
     """Called on UI changes (shares, price, ESG). No market data fetch."""
     data = get_portfolio_data_from_cache()
+    portfolio_obj = data['portfolio']
 
     return jsonify({
         'portfolio': data['portfolio'].to_dict(),
-        'income_plot': data['income_plot'].to_json()
+        'income_plot': data['income_plot'].to_json(),
+        'assets': _build_assets_payload(portfolio_obj)
     })
 
 @timed
@@ -103,14 +93,66 @@ def save_single_value(asset_type):
     if not all([ticker, field, isinstance(value, (int, float))]):
         return jsonify({'status': 'error', 'message': 'Invalid data received.'}), 400
         
+    # Get the current portfolio state BEFORE the update
+    old_data = get_portfolio_data_from_cache()
+    old_sub = getattr(old_data['portfolio'], asset_type, None)
+
+    # Snapshot map of ticker_metric -> color string
+    old_colors = {}
+    if old_sub:
+        for asset in old_sub.assets:
+            # Using your existing asset.to_dict()['status_colors']
+            asset_dict = asset.to_dict() if hasattr(asset, 'to_dict') else {}
+            for metric, color in asset_dict.get('status_colors', {}).items():
+                old_colors[f"{asset.ticker}_{metric}"] = color
+
+    # Update metric
     manager = AssetDataManager(asset_type)
     manager.update_ticker_metric(ticker, field, max(0.0, value))
     portfolio_data = get_portfolio_data_from_cache()
+
+    # Get the fresh portfolio state AFTER the update
+    new_data = get_portfolio_data_from_cache()
+    portfolio_obj = new_data['portfolio']
+    new_sub = getattr(portfolio_obj, asset_type, None)
+
+    # Compare status colors to find transitions
+    assets_payload = {}
+    
+    if new_sub:
+        for asset in new_sub.assets:
+            asset_dict = asset.to_dict() if hasattr(asset, 'to_dict') else {}
+            for metric, new_color in asset_dict.get('status_colors', {}).items():
+                key = f"{asset.ticker}_{metric}"
+                old_color = old_colors.get(key)
+
+                # If the background color actively changed, we have a threshold crossing event!
+                if old_color and old_color != new_color:
+                    if asset.ticker not in assets_payload:
+                        assets_payload[asset.ticker] = {'metrics': {}}
+                    
+                    # Convert 'bg-green'/'bg-red' to semantic statuses your JS understands
+                    def get_status_str(bg_class):
+                        if 'green' in bg_class: return 'good'
+                        if 'red' in bg_class: return 'bad'
+                        return 'caution'
+
+                    # Fetch the actual raw metric value dynamically
+                    val = asset.get(metric) if hasattr(asset, 'get') else getattr(asset, metric, 0)
+
+                    assets_payload[asset.ticker]['metrics'][metric] = {
+                        'value': val,
+                        'old_status': get_status_str(old_color),
+                        'new_status': get_status_str(new_color)
+                    }
+
+    logger.debug(f"Total threshold updates passing to UI: {assets_payload}")
     logger.debug("save_single_value out")
     return jsonify({
         'status': 'success',
         'portfolio': portfolio_data['portfolio'].to_dict(),
-        'income_plot': portfolio_data['income_plot'].to_json()
+        'income_plot': portfolio_data['income_plot'].to_json(),
+        'assets': assets_payload
     })
   
 @bp.route('/save_cash', methods=['POST'])
@@ -130,33 +172,30 @@ def save_cash():
 @bp.route('/add/<asset_class>', methods=['POST'])
 def add_asset(asset_class):
     ticker = request.form.get('ticker', '').upper().strip()
-    logger.debug(f"[ADD_ASSET] ticker={ticker}, asset_class={asset_class}")
-    if ticker:
-        #assets = storage_utils.get_assets(asset_class)
-        manager = AssetDataManager(asset_class)
-        current_tickers = manager.tickers
-        #logger.debug(f"[ADD_ASSET] current assets before append: {assets}")
-        if ticker not in current_tickers:
-            current_tickers.append(ticker)
-            #save_assets(assets, asset_class)
-            # This assignment triggers the @setter in the class, 
-            # which automatically sorts, de-duplicates, and saves the file.
-            manager.tickers = current_tickers
-            logger.info(f"Added {ticker} to {asset_class} portfolio.")
+    if not ticker:
+        return jsonify({"status": "error", "message": "No ticker provided"}), 400
 
-            # Download data for the new ticker before responding
-            finance_manager = current_app.config['FINANCE_MANAGERS'][asset_class]
-            live_interval = current_app.config['APP_CONFIG'].get("live_interval")
-            research_interval = current_app.config['APP_CONFIG'].get("research_interval")
-            
-            finance_manager._ensure_prices([ticker], live_interval, force=True)
-            if research_interval != live_interval:
-                finance_manager._ensure_prices([ticker], research_interval, force=True)
-            logger.debug(f"[ADD_ASSET] calling get_metrics with interval={live_interval}, tickers={manager.tickers}")
-            
-            finance_manager.get_metrics(manager.tickers, interval=live_interval, force=False)
-            logger.debug(f"[ADD_ASSET] get_metrics returned")
-    return jsonify({"status": "success", "message": "Ticker added"}), 200
+    logger.debug(f"[ADD_ASSET] ticker={ticker}, asset_class={asset_class}")
+    manager = AssetDataManager(asset_class)
+    current_tickers = manager.tickers
+
+    if ticker in current_tickers:
+        return jsonify({"status": "exists", "message": f"{ticker} already in portfolio"}), 200
+
+    current_tickers.append(ticker)
+    manager.tickers = current_tickers
+    logger.info(f"Added {ticker} to {asset_class} portfolio.")
+
+    # Download data for the new ticker before responding
+    finance_manager = current_app.config['FINANCE_MANAGERS'][asset_class]
+    live_interval = current_app.config['APP_CONFIG'].get("live_interval")
+    research_interval = current_app.config['APP_CONFIG'].get("research_interval")
+    
+    finance_manager._ensure_prices([ticker], live_interval, force=True)
+    if research_interval != live_interval:
+        finance_manager._ensure_prices([ticker], research_interval, force=True)
+    finance_manager.get_metrics(manager.tickers, interval=live_interval, force=False)
+    return jsonify({"status": "success", "message": f"{ticker} added"}), 200
   
 @bp.route('/delete/<asset_class>/<ticker>', methods=['POST'])
 def delete_asset(asset_class, ticker):

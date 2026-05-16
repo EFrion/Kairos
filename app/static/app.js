@@ -1,9 +1,63 @@
 class FinAppBase {
     constructor() {
+        if (this.constructor === FinAppBase) {
+            throw new TypeError("Cannot construct FinAppBase instances directly");
+        }
+        this.notifManager = new NotificationManager(this);
         this.loader = document.getElementById('loader');
+        this._globalSyncInterval = null;
+        this._globalSyncTimeout = null;
     }
 
-    // Unified Fetch with Loader Management
+    async initBase() {
+        await this.notifManager.init();
+        this._startGlobalSync();
+    }
+
+    // Global background processor
+    _startGlobalSync() {
+        const intervalMs = Math.min(
+            window.APP_CONFIG?.liveIntervalMs    || 900000,
+            window.APP_CONFIG?.researchIntervalMs || 86400000
+        );
+
+        this._runGlobalSync();
+
+        // Then align to period boundaries
+        const now = Date.now();
+        const msUntilNext = intervalMs - (now % intervalMs);
+        this._globalSyncTimeout = setTimeout(() => {
+            this._runGlobalSync();
+            this._globalSyncInterval = setInterval(
+                () => this._runGlobalSync(), intervalMs
+            );
+        }, msUntilNext);
+    }
+
+    async _runGlobalSync() {
+        try {
+            const data = await fetch('/api/background_check').then(r => r.json());
+
+            if (data.alerts) {
+                this.notifManager.setAlerts(data.alerts);
+            }
+            if (data.assets) {
+                this.notifManager.monitorStatusChanges(data);
+            }
+            if (typeof this.onBackgroundUpdate === 'function') {
+                this.onBackgroundUpdate(data);
+            }
+        } catch (err) {
+            console.error("Global background sync failed:", err);
+        }
+    }
+
+    destroy() {
+        if (this._globalSyncTimeout)  clearTimeout(this._globalSyncTimeout);
+        if (this._globalSyncInterval) clearInterval(this._globalSyncInterval);
+    }
+
+    // Fetch logic
     async apiRequest(url, options = {}) {
         if (this.loader) this.loader.classList.remove('hidden');
         try {
@@ -11,27 +65,27 @@ class FinAppBase {
             if (!response.ok) throw new Error(`Server Error: ${response.status}`);
             return await response.json();
         } catch (err) {
-            console.error("API Error:", err);
+            console.error(`API Error: ${err}`);
             throw err;
         } finally {
             if (this.loader) this.loader.classList.add('hidden');
         }
     }
 
+    // Ensure consistent currency format everywhere
     currencyFormat(value, currencyCode = 'EUR') {
         const val = typeof value === 'string' 
             ? parseFloat(value.replace(/\s/g, '').replace(',', '.')) 
             : value;
-
         if (isNaN(val) || val === 0) return `0.00 ${currencyCode === 'EUR' ? '€' : currencyCode}`;
-
+        
         // Handle tiny values (scientific notation)
         if (Math.abs(val) < 0.01) {
             const symbol = currencyCode === 'EUR' ? '€' : currencyCode;
             return val.toExponential(2) + " " + symbol;
         }
 
-        // Use the built-in currency formatter
+        // Built-in currency formatter
         return new Intl.NumberFormat('fr-FR', {
             style: 'currency',
             currency: currencyCode,
@@ -40,7 +94,7 @@ class FinAppBase {
         }).format(val).replace(',', '.'); 
     }
 
-    // Unified Plotly React wrapper
+    // Unified Plotly react wrapper
     renderPlot(containerId, figData, extraLayout = {}) {
         const container = document.getElementById(containerId);
         if (!container) return;
@@ -62,25 +116,34 @@ class PortfolioController extends FinAppBase {
         this.data = initialData;
         this.refreshInterval = interval || 900000;
         this.uiManager = new PortfolioUIManager(this);
-        this.notifManager = new NotificationManager(this);
         this.chartManager = new ChartManager(this);
-        this.syncManager = new SyncManager(this);
         this.tickerManager = new TickerManager(this);
         this.init();
     }
 
-    init() {
+    async init() {
         this.setupGlobalListeners();
         
         // Manager listeners
         this.uiManager.init();
         this.tickerManager.init();
-        this.notifManager.init();
-        this.syncManager.init(this.refreshInterval); // TODO change that
+        await this.initBase();
 
         // UI render
         if (this.data) {
             this.updateUI(this.data, 'stocks');
+        }
+        window.activeApp = this;
+    }
+
+    // Called by FinAppBase._runGlobalSync on every tick
+    onBackgroundUpdate(data) {
+        if (data.portfolio) {
+            this.updateUI(data, 'stocks');
+        }
+        if (data.last_sync && document.getElementById('last-sync-time')) {
+            document.getElementById('last-sync-time').textContent =
+                `Last sync: ${data.last_sync}`;
         }
     }
 
@@ -270,27 +333,6 @@ class PortfolioController extends FinAppBase {
     }
 }
 
-    // updatePieChart(elementId, labels, values, chartTitle) {
-    //     //console.log("updatePieChart called");
-    //     // Applies currencyFormat to the values inside chart slices
-    //     const formattedValues = values.map(v => currencyFormat(v));
-    //     const formattedPercentages = values.map(v => ((v / total) * 100).toFixed(2)); // Calculate and format percentages as currency
-    //     const customText = labels.map((label, i) => `${formattedPercentages[i]}%`);
-
-    //     const data = [{
-
-    //         
-    //     }];
-
-    //     const layout = {
-    //         title: {
-    //             y:1,
-    //             xanchor: 'center'
-    //         },
-    //         margin: { t: 0, b: 0, l: 50, r: 50 }
-    //     };
-    // }
-
 class ChartManager {
     /**
      * @param {PortfolioController} app - Reference to the main controller
@@ -318,7 +360,7 @@ class ChartManager {
     }
 
     refreshPieCharts(data, subPortfolio, assetType) {
-        console.log("refreshPieCharts called for asset type `$(assetType)`");
+        console.log(`refreshPieCharts called for asset type ${assetType}`);
         const manager = data.portfolio;
         
         // Prepare data for Global Allocation
@@ -513,10 +555,8 @@ class PortfolioUIManager {
         // Post-update logic
         //this.app.monitorStatusChanges();
         if (this.app.notifManager) {
-            this.app.notifManager.monitorStatusChanges();
+            this.app.notifManager.monitorStatusChanges(data);
         }
-
-        //if (this.dom.loader) {this.dom.loader.classList.add('hidden');}
     }
 
     setCellColor(id, bgClass) {
@@ -582,7 +622,7 @@ class PortfolioUIManager {
 class NotificationManager {
     constructor(app) {
         this.app = app;
-        
+        this.alerts = [];
         // Cache DOM elements
         this.dom = {
             bellBtn: document.getElementById('bellBtn'),
@@ -591,132 +631,214 @@ class NotificationManager {
         };
     }
 
-    init() {
+    async init() {
+        if (!this.dom.bellBtn || !this.dom.list) return;
         this.setupListeners();
-        this.render();
+        // Load persistent historical alerts from server upon page mount
+        await this.loadAlerts();
     }
 
+    //////////////////////
+    // Persistence methods
+    async loadAlerts() {
+        try {
+            const data = await fetch('/api/alerts').then(res => res.json());
+            this.setAlerts(data.alerts || []);
+        } catch (err) {
+            console.error("Failed to load persistent alerts:", err);
+        }
+    }
+
+    // TODO
+    async _saveToBackend() {
+        // --- DIAGNOSTIC LOGGING ---
+        console.warn(`[CLIENT SAVE] Pushing to /api/alerts. Total items: ${this.alerts.length}`);
+        if (this.alerts.length === 0) {
+            console.error("[CLIENT SAVE WARNING] Sending a blank array to the server! Trace:", new Error().stack);
+        }
+        // --------------------------
+        try {
+            await fetch('/api/alerts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ alerts: this.alerts })
+            });
+        } catch (err) {
+            console.error("Failed to persist alerts to server:", err);
+        }
+    }
+
+    setAlerts(alertsArray) {
+        this.alerts = alertsArray;
+        this.render();
+    }
+    ////////////////////////
+
+    ///////////////
+    // UI rendering
     setupListeners() {
         this.dom.bellBtn.addEventListener('click', (e) => {
             e.stopPropagation(); // Prevent clicks from closing the menu immediately
             const list = this.dom.list;
             const isVisible = list.style.display === 'block';
             list.style.display = isVisible ? 'none' : 'block';
-            if (!isVisible) this.markAsRead();
+            if (!isVisible) this.markAllAsRead();
         });
 
         // Close on outside click
         document.addEventListener('click', () => {
-            if (this.dom.list) {
-                this.dom.list.style.display = 'none';
-            }
+            if (this.dom.list) this.dom.list.style.display = 'none';
         });
 
         // Prevent the list itself from closing when clicking inside it
-        this.dom.list.addEventListener('click', (e) => {
-            e.stopPropagation();
-        });
-    }
-
-    getAlerts() {
-        return JSON.parse(localStorage.getItem('portfolio_alerts') || '[]');
-    }
-
-    saveAlerts(alerts) {
-        localStorage.setItem('portfolio_alerts', JSON.stringify(alerts));
-        this.render();
-    }
-
-    addStatusAlert(ticker, metric, oldStatus, newStatus) {
-        const alerts = this.getAlerts();
-        const message = `<strong>${ticker}</strong>: ${metric}: <span>${oldStatus}</span> -> <span>${newStatus}</span>`;
-        
-        alerts.unshift({
-            message: message,
-            status: 'unread',
-            time: new Date().toLocaleTimeString()
-        });
-
-        // Limit to 10 notifications at once
-        this.saveAlerts(alerts.slice(0, 10));
-    }
-
-    add(message) {
-        const alerts = this.getAlerts();
-        alerts.unshift({ message, status: 'unread', time: new Date().toLocaleTimeString() });
-        this.saveAlerts(alerts);
-    }
-
-    markAsRead() {
-        const alerts = this.getAlerts();
-        alerts.forEach(a => a.status = 'read');
-        this.saveAlerts(alerts);
-    }
-
-    clearAll() {
-        localStorage.removeItem('portfolio_alerts');
-        this.render();
+        this.dom.list.addEventListener('click', (e) => e.stopPropagation());
     }
 
     render() {
-        const alerts = this.getAlerts();
-        const unreadCount = alerts.filter(a => a.status === 'unread').length;
-
+        const unreadCount = this.alerts.filter(a => a.status === 'unread').length;
+        const appRef = 'window.activeApp';
         // Update badge
-        this.dom.bellBadge.style.display = unreadCount > 0 ? 'block' : 'none';
-        this.dom.bellBadge.textContent = unreadCount;
+        if (this.dom.bellBadge) {
+            this.dom.bellBadge.style.display = unreadCount > 0 ? 'block' : 'none';
+            this.dom.bellBadge.textContent = unreadCount;
+        }
 
         // Update list content
-        const items = alerts.map(a => `
-            <li style="padding: 10px; border-bottom: 1px solid #eee; background: ${a.status === 'unread' ? '#f0f7ff' : 'white'}">
-                <small style="color: #888;">${a.time}</small><br>${a.message}
+        let itemsHTML = this.alerts.map(a => `
+            <li onclick="(${appRef}).notifManager.markAsRead('${a.id}')"
+                style="padding: 12px; border-bottom: 1px solid #eee; background: ${a.status === 'unread' ? '#f0f7ff' : 'white'}; cursor: pointer; transition: background 0.2s;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
+                    <small style="color: #888; font-size: 0.8em;">${a.time}</small>
+                    ${a.status === 'unread'
+                        ? '<span style="width:8px; height:8px; background:#007BFF; border-radius:50%; margin-top: 4px;"></span>'
+                        : ''}
+                </div>
+                <div style="font-size: 0.9em; color: #333; line-height: 1.3;">
+                    <strong style="color: #111;">${a.title}</strong>: ${a.message}
+                </div>
             </li>
         `).join('');
-
-        this.dom.list.innerHTML = items || '<li style="padding:10px; text-align:center;">No notifications</li>';
         
-        // Add "Clear All" button if there are alerts
-        if (alerts.length > 0) {
-            this.dom.list.innerHTML += `
-                <div style="padding:10px; text-align:center; border-top:1px solid #ddd;">
-                    <button onclick="portfolioApp.notifManager.clearAll()">Clear All</button>
-                </div>`;
+        // Wrap list items inside a constrained rolling height container
+        const scrollContainerHTML = itemsHTML 
+            ? `<ul style="list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto;">
+                   ${itemsHTML}
+               </ul>`
+            : '<div style="padding: 20px 10px; text-align: center; color: #666; font-size: 0.9em;">No notifications</div>';
+        
+        // Add "Clear All" layout component button
+        const clearBtnHTML = this.alerts.length > 0 ? `
+            <div style="padding: 10px; text-align: center; border-top: 1px solid #ddd; background: #f9f9f9;">
+                <button onclick="(${appRef}).notifManager.clearAll()"
+                        style="cursor: pointer; border: 1px solid #ccc; background: white;
+                               padding: 5px 12px; border-radius: 4px; font-size: 0.85em; font-weight: 500;
+                               color: #555; hover: background: #f0f0f0;">
+                    Clear All
+                </button>
+            </div>` : '';
+
+        // Composite full component string into the DOM target layout
+        this.dom.list.innerHTML = scrollContainerHTML + clearBtnHTML;
+    }
+    /////////////////////
+
+    ////////////////////
+    // Alert logic
+    async add(message, type = 'info', title = 'Alert') {
+        this.alerts.unshift({
+            id: Date.now() + Math.random().toString(36).substr(2, 5), // Unique ID tracking
+            time: new Date().toLocaleTimeString(),
+            title: title,
+            message: message,
+            type: type,
+            status: 'unread'
+        });
+        this.render();
+        
+        // Persist to alerts.json instantly
+        await this._saveToBackend();
+    }
+
+    // Handles portfolio status transition checks
+    addStatusAlert(ticker, metric, oldStatus, newStatus) {
+        // Transform codes to user-friendly text labels
+        const labels = { 'good': 'good', 'caution': 'caution', 'bad': 'bad' };
+        const colors = { 'good': '#28a745', 'caution': '#fd7e14', 'bad': '#dc3545'};
+        const oldSpan = `<span style="color: ${colors[oldStatus]}; font-weight: 600;">${labels[oldStatus]}</span>`;
+        const newSpan = `<span style="color: ${colors[newStatus]}; font-weight: 600;">${labels[newStatus]}</span>`;
+        this.add(
+            `${ticker} ${metric.replace(/_/g, ' ')} changed from ${oldSpan} to ${newSpan}.`,
+            'status_change',
+            'Portfolio threshold cross'
+        );
+    }
+
+    monitorStatusChanges(newData) {
+        // Expects the raw portfolio structure from background sync
+        if (!newData?.assets) return;
+
+        console.log("Monitor received structure:", localStorage.getItem('portfolio_state'));
+        //const previousState = JSON.parse(localStorage.getItem('portfolio_state') || "{}");
+        //let stateChanged = false;
+
+        Object.entries(newData.assets).forEach(([ticker, assetData]) => {
+            if (!assetData.metrics) return;
+
+            Object.entries(assetData.metrics).forEach(([metricName, metricData]) => {
+                // Check if backend supplied direct delta statuses
+                if (metricData.old_status && metricData.new_status) {
+                    console.log(`Color change detected for ${ticker} ${metricName}: ${metricData.old_status} -> ${metricData.new_status}`);
+                    
+                    // Directly trigger the alert banner
+                    this.addStatusAlert(ticker, metricName, metricData.old_status, metricData.new_status);
+                } else {
+                    // FALLBACK: Keeps your automatic background sync syncs working as normal
+                    // using standard metric validation loops if coming from /api/background_check
+                    const previousState = JSON.parse(localStorage.getItem('portfolio_state') || "{}");
+                    const stateKey = `${ticker}_${metricName}`;
+                    const { value: val, green_limit, red_limit } = metricData;
+                    if (val === undefined || green_limit === undefined) return;
+
+                    const currentStatus = val >= green_limit ? 'good' : val <= red_limit ? 'bad' : 'caution';
+                    const oldStatus = previousState[stateKey];
+
+                    if (oldStatus !== undefined && oldStatus !== currentStatus) {
+                        this.addStatusAlert(ticker, metricName, oldStatus, currentStatus);
+                    }
+                    previousState[stateKey] = currentStatus;
+                    localStorage.setItem('portfolio_state', JSON.stringify(previousState));
+                }
+            });
+        });
+    }
+
+    // Triggered automatically whenever the user clicks the bell icon to open the window
+    markAllAsRead() {
+        const hasUnread = this.alerts.some(a => a.status === 'unread');
+        if (!hasUnread) return;
+
+        this.alerts.forEach(a => a.status = 'read');
+        this.render();
+        this._saveToBackend();
+    }
+
+    // Triggered when clicking a specific notification item in the list
+    markAsRead(alertId) {
+        const alert = this.alerts.find(a => a.id === alertId);
+        if (alert?.status === 'unread') {
+            alert.status = 'read';
+            this.render();
+            this._saveToBackend();
         }
     }
 
-    monitorStatusChanges() {
-        const cells = document.querySelectorAll('[data-ticker][data-metric]');
-        const previousState = JSON.parse(localStorage.getItem('portfolio_state') || "{}");
-        const currentState = {};
-        let hasNewAlerts = false;
-
-        cells.forEach(cell => {
-            const ticker = cell.dataset.ticker;
-            const metric = cell.dataset.metric;
-
-            if (!ticker || !metric){
-                console.log("Ticker or metric undefined");
-                return;
-            }
-
-            const stateKey = `${ticker}_${metric}`;
-            
-            // Determine status based on class
-            const currentStatus = cell.classList.contains('bg-green') ? 'good' : 
-                                cell.classList.contains('bg-orange') ? 'caution' : 'bad';
-            
-            currentState[stateKey] = currentStatus;
-
-            // Compare with the last saved state
-            if (previousState[stateKey] && previousState[stateKey] !== currentStatus) {
-                this.addStatusAlert(ticker, metric, previousState[stateKey], currentStatus);
-                hasNewAlerts = true;
-            }
-        });
-
-        // Save current state
-        localStorage.setItem('portfolio_state', JSON.stringify(currentState));
+    // Triggered by the "Clear All" button to wipe the list clean
+    clearAll() {
+        this.alerts = [];
+        this.render();
+        this._saveToBackend();
     }
+        
 }
 
 class TickerManager {
@@ -860,61 +982,50 @@ class TickerManager {
     }
 }
 
-class SyncManager {
-    /**
-     * @param {PortfolioController} app - Reference to the main controller
-     */
-    constructor(app) {
-        this.app = app;
-        this.intervalId = null;
-        this.timeoutId = null;
-    }
+// class SyncManager {
+//     /**
+//      * @param {PortfolioController} app - Reference to the main controller
+//      */
+//     constructor(controller) {
+//         this.controller = controller;
+//         this.dom = {
+//             syncBtn: document.getElementById('sync-button'),
+//             lastSyncText: document.getElementById('last-sync-time')
+//         };
+//         this.init();
+//     }
 
-    /**
-     * Calculates the alignment to the clock and starts the loop
-     * @param {number} intervalMs - Frequency of sync (e.g., 300000 for 5m)
-     */
-    init(intervalMs) {
-        const now = Date.now();
-        const msUntilNext = intervalMs - (now % intervalMs);
-        
-        // Immediate sync on startup
-        this.sync();
+//     init() {
+//         if (this.dom.syncBtn) {
+//             this.dom.syncBtn.addEventListener('click', () => this.sync(true));
+//         }
 
-        console.log(`SyncManager: Aligned to boundary. Next sync in ${Math.round(msUntilNext / 1000)}s`);
+//         // Link page-specific synchronization directly into the global app sync hook
+//         this.controller.onBackgroundUpdate = (data) => {
+//             console.log("Global sync tick detected on portfolio view.");
+//             if (data.portfolio_updated && data.portfolio_data) {
+//                 this.controller.ui.update(data.portfolio_data);
+//                 if (this.dom.lastSyncText && data.last_sync) {
+//                     this.dom.lastSyncText.textContent = `Last Sync: ${data.last_sync}`;
+//                 }
+//             }
+//         };
+//     }
 
-        // Fire once at the boundary, then every interval after that
-        this.timeoutId = setTimeout(() => {
-            this.sync();
-            this.intervalId = setInterval(() => this.sync(), intervalMs);
-        }, msUntilNext);
-    }
+//     async sync(force = false) {
+//         console.log("SyncManager: syncing at", new Date().toLocaleTimeString());
 
-    async sync() {
-        console.log("SyncManager: syncing at", new Date().toLocaleTimeString());
-
-        try {
-            // We use the app's apiRequest to benefit from unified error handling
-            const data = await this.app.apiRequest('/update_portfolio_cache', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            });
-
-            // Tell the main controller to refresh the screen with new data
-            this.app.updateUI(data, 'stocks');
-            console.log("SyncManager: UI updated successfully.");
-        } catch (err) {
-            console.error("SyncManager: Sync failed", err);
-        }
-    }
-
-    stop() {
-        if (this.timeoutId) clearTimeout(this.timeoutId);
-        if (this.intervalId) clearInterval(this.intervalId);
-        //this.timeoutId = null;
-        //this.intervalId = null;
-    }
-}
+//         try {
+//             const data = await this.controller.apiRequest(`/sync?force=${force}`);
+//             this.controller.ui.update(data);
+//             if (this.dom.lastSyncText && data.last_sync) {
+//                 this.dom.lastSyncText.textContent = `Last Sync: ${data.last_sync}`;
+//             }
+//         } catch (err) {
+//             alert("Sync processing failed. Check runtime logs.");
+//         }
+//     }
+// }
 
 class ResearchController extends FinAppBase {
     constructor(config) {
@@ -941,7 +1052,8 @@ class ResearchController extends FinAppBase {
         this.init();
     }
 
-    init() {
+    async init() {
+        await this.initBase();
         this.registerEventListeners();
         this.updateView();
         this.updatePortfolioView();
@@ -959,6 +1071,7 @@ class ResearchController extends FinAppBase {
             });
             resizeObserver.observe(this.dom.tickerContainer);
         }
+        window.activeApp = this;
     }
 
     // Asset Level Logic

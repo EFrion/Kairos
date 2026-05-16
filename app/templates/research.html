@@ -108,10 +108,7 @@
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             console.log("Initialising Research App...");
-            const config = {
-                selectedTicker: "{{ selected_ticker }}"
-            };
-            window.researchApp = new ResearchController(config);
+            new ResearchController({ selectedTicker: "{{ selected_ticker | default('', true) }}" });
         });
     </script>
     {% endblock %}

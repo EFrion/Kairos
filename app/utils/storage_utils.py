@@ -108,3 +108,204 @@ class PortfolioDataManager(JSONPersistenceManager):
     def get_forex_rates(self):
         data = self.load('last_fetch_date.json')
         return {k: v for k, v in data.items() if k.endswith('_rate')}
+    
+class AlertNotificationManager(JSONPersistenceManager):
+    """Handles global/cross-asset persistent historical alerts using atomic JSON writes."""
+    
+    def __init__(self, data_dir=None):
+        super().__init__(data_dir=data_dir)
+        self.filename = 'alerts.json'
+
+    def get_alerts(self):
+        """Loads and returns the current list of alerts."""
+        return self.load(self.filename, default=[])
+
+    def save_alerts(self, alerts_list):
+        """
+        Persists alerts atomically while generating explicit logs tracking
+        what changed before and after the operational write.
+        """
+        import inspect
+        from flask import request
+
+        # 1. Read what is securely saved on disk right now
+        disk_alerts = self.get_alerts()
+        len_before = len(disk_alerts)
+        len_incoming = len(alerts_list)
+
+        # Extract who called this Python method in the backend callstack
+        caller_func = inspect.stack()[1].function
+
+        logger.info(f"============================================================")
+        logger.info(f"[ALERTS AUDIT] Route hit: {request.method} {request.path} (Endpoint: {request.endpoint})")
+        logger.info(f"[ALERTS AUDIT] Triggered internally by Python function: '{caller_func}'")
+        logger.info(f"[ALERTS AUDIT] Items on Disk BEFORE: {len_before} | Items INCOMING from UI: {len_incoming}")
+
+        # 2. Check for suspicious empty overwrites
+        if len_before > 0 and len_incoming == 0:
+            logger.error(f"⚠️ [ALERTS AUDIT WARNING] DETECTED AN OVERWRITE! File had {len_before} alerts, but incoming payload is EMPTY.")
+            
+            # GUARDRAIL: If this isn't an explicit client POST hitting the alert manager route, abort the wipe!
+            if not (request.endpoint == 'api.alerts' and request.method == 'POST'):
+                logger.error(f"❌ [ALERTS AUDIT] Aborting destructive save. Preserving active disk data.")
+                return
+
+        # 3. Process safe merging logic
+        disk_map = {a['id']: a for a in disk_alerts}
+        for alert in alerts_list:
+            alert_id = alert.get('id')
+            if alert_id in disk_map:
+                # Update status tags (e.g., read vs unread)
+                disk_map[alert_id]['status'] = alert.get('status', disk_map[alert_id]['status'])
+            else:
+                # If it's a completely new alert, insert it at the front
+                disk_alerts.insert(0, alert)
+
+        # Handle genuine clear action explicitly triggered by user clicking "Clear All"
+        if len_incoming == 0 and request.endpoint == 'api.alerts' and request.method == 'POST':
+            disk_alerts = []
+
+        # 4. Save to disk and evaluate what is there AFTER writing
+        self.save(self.filename, disk_alerts)
+        
+        disk_alerts_after = self.get_alerts()
+        logger.info(f"[ALERTS AUDIT] Items on Disk AFTER operational save: {len(disk_alerts_after)}")
+        logger.info(f"============================================================")
+        """
+        Persists alerts atomically while generating explicit logs tracking
+        what changed before and after the operational write.
+        """
+        import inspect
+        from flask import request
+
+        # 1. Look up what currently exists on disk BEFORE writing
+        disk_alerts_before = self.get_alerts()
+        len_before = len(disk_alerts_before)
+        len_incoming = len(alerts_list)
+
+        # Extract who called this Python method in the backend callstack
+        caller_func = inspect.stack()[1].function
+
+        logger.info(f"============================================================")
+        logger.info(f"[ALERTS AUDIT] Route hit: {request.method} {request.path} (Endpoint: {request.endpoint})")
+        logger.info(f"[ALERTS AUDIT] Triggered internally by Python function: '{caller_func}'")
+        logger.info(f"[ALERTS AUDIT] Items on Disk BEFORE: {len_before} | Items INCOMING from UI: {len_incoming}")
+
+        # 2. Check for suspicious empty overwrites
+        if len_before > 0 and len_incoming == 0:
+            logger.error(f"⚠️ [ALERTS AUDIT WARNING] DETECTED AN OVERWRITE! File had {len_before} alerts, but incoming payload is EMPTY.")
+            
+            # GUARDRAIL: If this isn't an explicit client POST hitting the alert manager route, abort the wipe!
+            if not (request.endpoint == 'api.alerts' and request.method == 'POST'):
+                logger.error(f"❌ [ALERTS AUDIT] Aborting destructive save. Preserving active disk data.")
+                return
+
+        # 3. Process safe merging logic using the correct variable name
+        disk_map = {a['id']: a for a in disk_alerts_before}
+        for alert in alerts_list:
+            alert_id = alert.get('id')
+            if alert_id in disk_map:
+                # Update status tags (e.g., read vs unread)
+                disk_map[alert_id]['status'] = alert.get('status', disk_map[alert_id]['status'])
+            else:
+                # If it's a completely new alert, insert it at the front
+                disk_alerts_before.insert(0, alert)
+
+        # Handle genuine clear action explicitly triggered by user clicking "Clear All"
+        if len_incoming == 0 and request.endpoint == 'api.alerts' and request.method == 'POST':
+            disk_alerts_before = []
+
+        # 4. Save to disk and evaluate what is there AFTER writing
+        self.save(self.filename, disk_alerts_before)
+        
+        disk_alerts_after = self.get_alerts()
+        logger.info(f"[ALERTS AUDIT] Items on Disk AFTER operational save: {len(disk_alerts_after)}")
+        logger.info(f"============================================================")
+        """
+        Persists alerts atomically while generating explicit logs tracking
+        what changed before and after the operational write.
+        """
+        import inspect
+        from flask import request
+
+        # 1. Look up what currently exists on disk BEFORE writing
+        disk_alerts_before = self.get_alerts()
+        len_before = len(disk_alerts_before)
+        len_incoming = len(alerts_list)
+
+        # Extract who called this Python method in the backend callstack
+        caller_func = inspect.stack()[1].function
+
+        logger.info(f"============================================================")
+        logger.info(f"[ALERTS AUDIT] Route hit: {request.method} {request.path} (Endpoint: {request.endpoint})")
+        logger.info(f"[ALERTS AUDIT] Triggered internally by Python function: '{caller_func}'")
+        logger.info(f"[ALERTS AUDIT] Items on Disk BEFORE: {len_before} | Items INCOMING from UI: {len_incoming}")
+
+        # 2. Let's flag structural mutations explicitly
+        if len_before > 0 and len_incoming == 0:
+            logger.error(f"⚠️ [ALERTS AUDIT WARNING] DETECTED AN OVERWRITE! File had {len_before} alerts, but incoming payload is EMPTY.")
+            
+            # GUARDRAIL: If this isn't an explicit client POST hitting the alert manager route, abort the wipe!
+            if not (request.endpoint == 'api.alerts' and request.method == 'POST'):
+                logger.error(f"❌ [ALERTS AUDIT] Aborting destructive save. Preserving active disk data.")
+                return
+
+        # 3. Process safe merging logic
+        disk_map = {a['id']: a for a in disk_alerts_before}
+        for alert in alerts_list:
+            alert_id = alert.get('id')
+            if alert_id in disk_map:
+                disk_map[alert_id]['status'] = alert.get('status', disk_map[alert_id]['status'])
+            else:
+                disk_alerts_before.insert(0, alert)
+
+        # Handle genuine clear action explicitly triggered by user interaction
+        if len_incoming == 0 and request.endpoint == 'api.alerts' and request.method == 'POST':
+            disk_alerts_before = []
+
+        # 4. Save to disk and evaluate what is there AFTER writing
+        self.save(self.filename, disk_alerts_before)
+        
+        disk_alerts_after = self.get_alerts()
+        logger.info(f"[ALERTS AUDIT] Items on Disk AFTER operational save: {len(disk_alerts_after)}")
+        logger.info(f"============================================================")
+        """
+        Persists an array of alerts atomically to data/alerts.json by safely
+        merging incoming client items with existing items on disk.
+        """
+        import inspect
+        from flask import request
+
+        # Read what is saved on disk right now
+        disk_alerts_before = self.get_alerts()
+        len_before = len(disk_alerts_before)
+        len_incoming = len(alerts_list)
+
+        # Extract who called this Python method in the backend callstack
+        caller_func = inspect.stack()[1].function
+
+        logger.info(f"============================================================")
+        logger.info(f"[ALERTS AUDIT] Route hit: {request.method} {request.path} (Endpoint: {request.endpoint})")
+        logger.info(f"[ALERTS AUDIT] Triggered internally by Python function: '{caller_func}'")
+        logger.info(f"[ALERTS AUDIT] Items on Disk BEFORE: {len_before} | Items INCOMING from UI: {len_incoming}")
+
+        # Create a lookup map of existing IDs on disk
+        disk_map = {a['id']: a for a in disk_alerts_before}
+
+        # Process incoming alerts from the frontend
+        for alert in alerts_list:
+            alert_id = alert.get('id')
+            
+            if alert_id in disk_map:
+                # Update mutable tracking fields (like changing 'status' from 'unread' to 'read')
+                disk_map[alert_id]['status'] = alert.get('status', disk_map[alert_id]['status'])
+            else:
+                # If it's a completely brand new threshold crossover alert, insert it at the top
+                disk_alerts.insert(0, alert)
+                
+        # Handle explicit user deletions
+        if len(alerts_list) == 0:
+            disk_alerts = []
+
+        # Atomically persist the safely merged array
+        self.save(self.filename, disk_alerts)

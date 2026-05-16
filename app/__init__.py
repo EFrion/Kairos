@@ -57,10 +57,11 @@ def create_app():
         config=app_config
     )
 
-    from .routes import cashflow, portfolio, research
+    from .routes import cashflow, portfolio, research, api
     app.register_blueprint(cashflow.bp)
     app.register_blueprint(portfolio.bp)
     app.register_blueprint(research.bp)
+    app.register_blueprint(api.bp)
     
     # Initialise a database    
     with app.app_context():
@@ -71,5 +72,16 @@ def create_app():
     # Register filters with Jinja2
     from .routes.cashflow import datetime_format
     app.jinja_env.filters['strftime'] = datetime_format
-    
+    app.jinja_env.filters['interval_to_ms'] = interval_to_ms
+
     return app
+
+def interval_to_ms(interval: str) -> int:
+    """Convert interval string to milliseconds for JS polling."""
+    units = {"m": 60, "h": 3600, "d": 86400}
+    try:
+        value = int(interval[:-1])
+        unit = interval[-1]
+        return value * units[unit] * 1000
+    except (ValueError, KeyError):
+        return 15 * 60 * 1000  # fallback: 15 minutes
